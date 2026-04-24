@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import msvcrt
 import os
 import re
 import shutil
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.14"
+TOOL_VERSION = "0.1.15"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -623,6 +624,31 @@ def _plugins_data_dir(game_dir: Path) -> Path:
     return game_dir / "Ship" / "ReturnOfModding" / "plugins_data"
 
 
+def _return_of_modding_dir(game_dir: Path) -> Path:
+    """返回 ReturnOfModding 根目录，不存在时创建。"""
+    path = game_dir / "Ship" / "ReturnOfModding"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def open_game(game_dir: Path) -> None:
+    """启动 Hades II 游戏程序。"""
+    exe = game_dir / "Ship" / "Hades2.exe"
+    if not exe.exists():
+        raise SystemExit(f"找不到游戏程序：{exe}")
+    os.startfile(str(exe))
+    print(f"已启动游戏：{exe}")
+
+
+def open_mod_directory(game_dir: Path) -> None:
+    """打开 ReturnOfModding 的 Mod 目录。"""
+    mod_dir = _return_of_modding_dir(game_dir)
+    _plugins_dir(game_dir).mkdir(parents=True, exist_ok=True)
+    _plugins_data_dir(game_dir).mkdir(parents=True, exist_ok=True)
+    os.startfile(str(mod_dir))
+    print(f"已打开 Mod 目录：{mod_dir}")
+
+
 def _generated_plugin_dir(mod_dir: Path) -> Path:
     """返回生成结果中的插件脚本目录。"""
     plugin_dir = mod_dir / "plugins" / mod_dir.name
@@ -798,31 +824,87 @@ def remove_backgrounds(source_dir: Path) -> Path:
     return output_dir
 
 
+def _clear_screen() -> None:
+    """清空控制台画面。"""
+    os.system("cls")
+
+
+def _read_menu_key() -> str:
+    """读取方向键、回车或数字菜单按键。"""
+    key = msvcrt.getwch()
+    if key in ("\r", "\n"):
+        return "enter"
+    if key in ("\x00", "\xe0"):
+        second = msvcrt.getwch()
+        if second == "H":
+            return "up"
+        if second == "P":
+            return "down"
+    if key.isdigit():
+        return key
+    return ""
+
+
+def _select_menu(title: str, options: list[tuple[str, str]]) -> str:
+    """用上下键选择菜单项，回车确认，同时支持数字快捷键。"""
+    selected = 0
+    while True:
+        _clear_screen()
+        print(title)
+        print("使用上下键选择，回车确认；也可以直接按数字。")
+        print()
+        for index, (_, label) in enumerate(options):
+            marker = ">" if index == selected else " "
+            shortcut = "0" if options[index][0] == "exit" else str(index + 1)
+            print(f"{marker} {shortcut}. {label}")
+
+        key = _read_menu_key()
+        if key == "up":
+            selected = (selected - 1) % len(options)
+        elif key == "down":
+            selected = (selected + 1) % len(options)
+        elif key == "enter":
+            return options[selected][0]
+        elif key.isdigit():
+            if key == "0" and options[-1][0] == "exit":
+                return "exit"
+            index = int(key) - 1
+            if 0 <= index < len(options):
+                return options[index][0]
+
+
 def interactive_menu(config: dict) -> None:
     """无参数启动时显示可双击使用的交互菜单。"""
+    options = [
+        ("export", "导出立绘资源"),
+        ("build_install", "生成并安装资源替换 Mod"),
+        ("build_only", "仅生成资源替换 Mod"),
+        ("remove_bg", "图片去背景"),
+        ("open_game", "打开游戏"),
+        ("open_mod_dir", "打开 Mod 目录"),
+        ("detect", "自动检测并缓存游戏目录"),
+        ("set_game", "手动设置游戏目录"),
+        ("namespace", "修改默认作者"),
+        ("exit", "退出"),
+    ]
     while True:
+        title = f"当前默认作者：{get_default_namespace(config)}"
+        if config.get("game_dir"):
+            title += f"\n当前游戏目录：{config['game_dir']}"
+        else:
+            title += "\n当前未缓存游戏目录"
+        choice = _select_menu(title, options)
         print()
-        print(f"当前默认作者：{get_default_namespace(config)}")
-        print("请选择操作：")
-        print("1. 导出立绘资源")
-        print("2. 生成并安装资源替换 Mod")
-        print("3. 仅生成资源替换 Mod")
-        print("4. 图片去背景")
-        print("5. 自动检测并缓存游戏目录")
-        print("6. 手动设置游戏目录")
-        print("7. 修改默认作者")
-        print("0. 退出")
-        choice = input("输入序号: ").strip()
 
-        if choice == "0":
+        if choice == "exit":
             return
-        if choice == "1":
+        if choice == "export":
             try:
                 game_dir = resolve_game_dir(config, None)
                 export_portraits(game_dir, HADES_EXPORT_DIR, DEFAULT_RESOLUTION, clean=True)
             except SystemExit as exc:
                 print(exc)
-        elif choice == "2":
+        elif choice == "build_install":
             try:
                 source = _select_directory("选择替换资源目录", HADES_EXPORT_DIR)
                 if source is None:
@@ -843,7 +925,7 @@ def interactive_menu(config: dict) -> None:
                 print(f"输入无效：{exc}")
             except SystemExit as exc:
                 print(exc)
-        elif choice == "3":
+        elif choice == "build_only":
             try:
                 source = _select_directory("选择替换资源目录", HADES_EXPORT_DIR)
                 if source is None:
@@ -862,7 +944,7 @@ def interactive_menu(config: dict) -> None:
                 print(f"输入无效：{exc}")
             except SystemExit as exc:
                 print(exc)
-        elif choice == "4":
+        elif choice == "remove_bg":
             try:
                 source = _select_directory("选择要去背景的图片目录", HADES_EXPORT_DIR)
                 if source is None:
@@ -871,7 +953,19 @@ def interactive_menu(config: dict) -> None:
                 remove_backgrounds(source)
             except SystemExit as exc:
                 print(exc)
-        elif choice == "5":
+        elif choice == "open_game":
+            try:
+                game_dir = resolve_game_dir(config, None)
+                open_game(game_dir)
+            except SystemExit as exc:
+                print(exc)
+        elif choice == "open_mod_dir":
+            try:
+                game_dir = resolve_game_dir(config, None)
+                open_mod_directory(game_dir)
+            except SystemExit as exc:
+                print(exc)
+        elif choice == "detect":
             found = detect_game_dirs()
             if not found:
                 print("未检测到 Hades II。")
@@ -886,7 +980,7 @@ def interactive_menu(config: dict) -> None:
             config["game_dir"] = str(found[index - 1])
             _save_json(CONFIG_PATH, config)
             print(f"已缓存：{found[index - 1]}")
-        elif choice == "6":
+        elif choice == "set_game":
             try:
                 selected = _select_directory("选择 Hades II 游戏目录或 Ship 目录")
                 if selected is None:
@@ -899,7 +993,7 @@ def interactive_menu(config: dict) -> None:
             config["game_dir"] = str(game_dir)
             _save_json(CONFIG_PATH, config)
             print(f"已设置游戏目录：{game_dir}")
-        elif choice == "7":
+        elif choice == "namespace":
             try:
                 namespace = _normalize_name(_prompt_text("默认作者 namespace", get_default_namespace(config)), "namespace")
             except SystemExit as exc:
@@ -908,8 +1002,7 @@ def interactive_menu(config: dict) -> None:
             config["namespace"] = namespace
             _save_json(CONFIG_PATH, config)
             print(f"已设置默认作者：{namespace}")
-        else:
-            print("未知选项。")
+        input("按回车返回菜单...")
 
 
 def build_parser() -> argparse.ArgumentParser:

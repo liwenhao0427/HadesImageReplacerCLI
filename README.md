@@ -28,6 +28,8 @@ python hir_cli.py
 
 无参数启动会进入交互菜单。
 
+交互菜单支持上下键选择、回车确认，也保留数字快捷键。菜单里可以直接启动游戏，或打开 `ReturnOfModding` Mod 目录。
+
 ```powershell
 python hir_cli.py detect
 python hir_cli.py config --game "E:\SteamLibrary\steamapps\common\Hades II"
