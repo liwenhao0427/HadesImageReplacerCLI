@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.13"
+TOOL_VERSION = "0.1.14"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -49,6 +49,7 @@ class Replacement:
 
     source: Path
     target: Path
+    original_height: int | None = None
 
 
 @contextmanager
@@ -270,7 +271,8 @@ def export_portraits(game_dir: Path, output_dir: Path, resolution: str, clean: b
                     )
                     target = output_dir / filename
                     restored.save(target)
-                    rows.append([package.name, resource_name, filename])
+                    width, height = restored.size
+                    rows.append([package.name, resource_name, filename, width, height])
                     package_image_count += 1
                     image_count += 1
 
@@ -281,7 +283,7 @@ def export_portraits(game_dir: Path, output_dir: Path, resolution: str, clean: b
     index_path = output_dir / "_portrait_index.tsv"
     with index_path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file, delimiter="\t")
-        writer.writerow(["package", "resource_name", "filename"])
+        writer.writerow(["package", "resource_name", "filename", "original_width", "original_height"])
         writer.writerows(rows)
 
     print(f"完成：{package_count} 个包，{image_count} 张图片。")
@@ -312,6 +314,16 @@ def _safe_relative(path: Path) -> Path:
     return Path(*parts)
 
 
+def _read_optional_int(value: str | None) -> int | None:
+    """读取可选整数，空值或非法值返回 None。"""
+    if value is None or value.strip() == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
 def _read_index_replacements(source_dir: Path, index_path: Path) -> list[Replacement]:
     """从导出索引恢复资源路径，并只收集仍存在的 PNG。"""
     replacements: list[Replacement] = []
@@ -326,7 +338,13 @@ def _read_index_replacements(source_dir: Path, index_path: Path) -> list[Replace
             if not source.exists():
                 continue
             target = _safe_relative(Path(resource_name.replace("\\", "/") + ".png"))
-            replacements.append(Replacement(source=source, target=target))
+            replacements.append(
+                Replacement(
+                    source=source,
+                    target=target,
+                    original_height=_read_optional_int(row.get("original_height")),
+                )
+            )
     return replacements
 
 
@@ -368,14 +386,55 @@ def collect_replacements(source_dir: Path) -> list[Replacement]:
     return result
 
 
+def _same_file(left: Path, right: Path) -> bool:
+    """判断两个路径是否指向同一文件，路径不存在时返回 False。"""
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return False
+
+
+def _fallback_original_height(item: Replacement) -> int | None:
+    """从 hadesExport 同名原图读取旧索引缺失的原始高度。"""
+    reference = HADES_EXPORT_DIR / item.source.name
+    if not reference.exists() or _same_file(reference, item.source):
+        return None
+    Image = _load_pillow()
+    with Image.open(reference) as image:
+        return image.height
+
+
+def _copy_or_resize_replacement(item: Replacement, target: Path) -> bool:
+    """复制替换图；已知原始高度时按高度等比缩放。"""
+    original_height = item.original_height or _fallback_original_height(item)
+    if original_height is None:
+        shutil.copy2(item.source, target)
+        return False
+
+    Image = _load_pillow()
+    with Image.open(item.source) as image:
+        if image.height == original_height:
+            shutil.copy2(item.source, target)
+            return False
+        new_width = max(1, round(image.width * original_height / image.height))
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        resized = image.resize((new_width, original_height), resampling)
+        resized.save(target)
+        return True
+
+
 def _copy_replacements(replacements: list[Replacement], work_dir: Path) -> None:
-    """复制替换图片到 deppth2 输入目录。"""
+    """复制替换图片到 deppth2 输入目录，并按原始高度等比校正尺寸。"""
     if work_dir.exists():
         shutil.rmtree(work_dir)
+    resized_count = 0
     for item in replacements:
         target = work_dir / item.target
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(item.source, target)
+        if _copy_or_resize_replacement(item, target):
+            resized_count += 1
+    if resized_count:
+        print(f"已按原始高度等比缩放 {resized_count} 张图片。")
 
 
 def _resource_path_for_lua(target: Path) -> str:

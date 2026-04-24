@@ -9,3 +9,5 @@ dist/
 !HadesImageReplacer.spec
 __pycache__/
 *.pyc
+*.exe
+!vendor/deppth2/texconv/texconv.exe

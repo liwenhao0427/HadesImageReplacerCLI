@@ -62,6 +62,8 @@ python hir_cli.py import --source hadesExport --install
 
 如果 `--source` 目录内存在 `_portrait_index.tsv`，工具会按索引恢复游戏资源路径；如果没有索引但 `hadesExport` 里有导出索引，会自动沿用它匹配同名 PNG。安装时会分开复制到：
 
+生成 Mod 前，工具会尽量让替换图高度与原始导出图一致，并按比例自动调整宽度，减少游戏内拉伸变形。新导出的 `_portrait_index.tsv` 会记录原始尺寸；旧索引缺少尺寸时，会回退读取当前 `hadesExport` 里的同名原图高度。
+
 ```text
 Hades II\Ship\ReturnOfModding\plugins\<作者-Mod名>
 Hades II\Ship\ReturnOfModding\plugins_data\<作者-Mod名>
