@@ -1,0 +1,11 @@
+hir_config.json
+exported_portraits*/
+hadesExport/
+*_去背景/
+generated_mods/
+build/
+dist/
+*.spec
+!HadesImageReplacer.spec
+__pycache__/
+*.pyc
