@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.16"
+TOOL_VERSION = "0.1.17"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -116,9 +116,10 @@ def _load_deppth() -> tuple[type, object]:
 def _load_pillow():
     """按需加载 Pillow，用于图片去背景。"""
     try:
-        from PIL import Image
+        from PIL import Image, ImageFile
     except ModuleNotFoundError as exc:
         raise SystemExit("缺少 Pillow。请在本目录执行：python -m pip install -r requirements.txt") from exc
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
     return Image
 
 
@@ -816,19 +817,44 @@ def _collect_preview_pairs(source_dir: Path) -> list[PreviewPair]:
     return pairs
 
 
-def _preview_image(path: Path, max_size: tuple[int, int]):
-    """读取图片并缩放到预览窗口可显示的尺寸。"""
-    Image = _load_pillow()
-    image = Image.open(path).convert("RGBA")
-    image.thumbnail(max_size)
-    return image
-
-
-def _image_size(path: Path) -> tuple[int, int]:
-    """读取图片原始宽高。"""
+def _read_rgba_image(path: Path):
+    """读取图片并转为 RGBA，兼容部分截断 PNG。"""
     Image = _load_pillow()
     with Image.open(path) as image:
-        return image.size
+        return image.convert("RGBA")
+
+
+def _resize_to_height(image, height: int):
+    """按目标高度等比缩放图片，宽度自适应。"""
+    Image = _load_pillow()
+    if image.height == height:
+        return image.copy()
+    new_width = max(1, round(image.width * height / image.height))
+    resampling = getattr(Image, "Resampling", Image).LANCZOS
+    return image.resize((new_width, height), resampling)
+
+
+def _fit_preview(image, max_size: tuple[int, int]):
+    """缩放图片副本到预览窗口可显示尺寸。"""
+    preview = image.copy()
+    preview.thumbnail(max_size)
+    return preview
+
+
+def _overlay_images(original, replacement):
+    """把原图和按游戏规则缩放后的替换图居中叠加。"""
+    Image = _load_pillow()
+    width = max(original.width, replacement.width)
+    height = max(original.height, replacement.height)
+    canvas = Image.new("RGBA", (width, height), (32, 32, 32, 255))
+    original_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    replacement_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    original_x = (width - original.width) // 2
+    replacement_x = (width - replacement.width) // 2
+    original_layer.alpha_composite(original, (original_x, 0))
+    replacement_layer.alpha_composite(replacement, (replacement_x, 0))
+    canvas = Image.alpha_composite(canvas, original_layer)
+    return Image.blend(canvas, Image.alpha_composite(canvas, replacement_layer), 0.5)
 
 
 def preview_mod_images(source_dir: Path) -> None:
@@ -840,51 +866,78 @@ def preview_mod_images(source_dir: Path) -> None:
     ImageTk = _load_image_tk()
     root = tk.Tk()
     root.title(f"Hades Image Replacer 预览 - {source_dir.name}")
-    root.geometry("1180x820")
+    root.geometry("1560x820")
 
-    state = {"index": 0, "left": None, "right": None}
+    state = {"index": 0, "original": None, "replacement": None, "overlay": None}
     title_var = tk.StringVar()
     original_var = tk.StringVar()
     replacement_var = tk.StringVar()
+    overlay_var = tk.StringVar()
 
     tk.Label(root, textvariable=title_var, font=("Microsoft YaHei UI", 12, "bold")).grid(
-        row=0, column=0, columnspan=2, pady=(10, 6)
+        row=0, column=0, columnspan=3, pady=(10, 6)
     )
     original_label = tk.Label(root, text="原始游戏资源", font=("Microsoft YaHei UI", 10, "bold"))
-    replacement_label = tk.Label(root, text="替换图片", font=("Microsoft YaHei UI", 10, "bold"))
+    replacement_label = tk.Label(root, text="游戏内替换效果", font=("Microsoft YaHei UI", 10, "bold"))
+    overlay_label = tk.Label(root, text="叠图对比", font=("Microsoft YaHei UI", 10, "bold"))
     original_label.grid(row=1, column=0)
     replacement_label.grid(row=1, column=1)
+    overlay_label.grid(row=1, column=2)
 
-    left_image = tk.Label(root, bg="#222222", width=560, height=680)
-    right_image = tk.Label(root, bg="#222222", width=560, height=680)
-    left_image.grid(row=2, column=0, padx=10, sticky="nsew")
-    right_image.grid(row=2, column=1, padx=10, sticky="nsew")
+    original_image = tk.Label(root, bg="#222222", width=500, height=650)
+    replacement_image = tk.Label(root, bg="#222222", width=500, height=650)
+    overlay_image = tk.Label(root, bg="#222222", width=500, height=650)
+    original_image.grid(row=2, column=0, padx=8, sticky="nsew")
+    replacement_image.grid(row=2, column=1, padx=8, sticky="nsew")
+    overlay_image.grid(row=2, column=2, padx=8, sticky="nsew")
 
-    tk.Label(root, textvariable=original_var, wraplength=540, justify="left").grid(
-        row=3, column=0, padx=10, pady=(6, 10), sticky="w"
+    tk.Label(root, textvariable=original_var, wraplength=480, justify="left").grid(
+        row=3, column=0, padx=8, pady=(6, 10), sticky="w"
     )
-    tk.Label(root, textvariable=replacement_var, wraplength=540, justify="left").grid(
-        row=3, column=1, padx=10, pady=(6, 10), sticky="w"
+    tk.Label(root, textvariable=replacement_var, wraplength=480, justify="left").grid(
+        row=3, column=1, padx=8, pady=(6, 10), sticky="w"
+    )
+    tk.Label(root, textvariable=overlay_var, wraplength=480, justify="left").grid(
+        row=3, column=2, padx=8, pady=(6, 10), sticky="w"
     )
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
+    root.grid_columnconfigure(2, weight=1)
     root.grid_rowconfigure(2, weight=1)
 
     def show(index: int) -> None:
         pair = pairs[index]
-        left = _preview_image(pair.original, (540, 660))
-        right = _preview_image(pair.replacement, (540, 660))
-        original_size = _image_size(pair.original)
-        replacement_size = _image_size(pair.replacement)
-        state["left"] = ImageTk.PhotoImage(left)
-        state["right"] = ImageTk.PhotoImage(right)
-        left_image.configure(image=state["left"])
-        right_image.configure(image=state["right"])
+        try:
+            original = _read_rgba_image(pair.original)
+            replacement_source = _read_rgba_image(pair.replacement)
+            replacement = _resize_to_height(replacement_source, original.height)
+            overlay = _overlay_images(original, replacement)
+        except Exception as exc:
+            title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    图片读取失败，↑↓ 切换，Esc 关闭")
+            original_var.set(f"{pair.original}\n读取失败：{exc}")
+            replacement_var.set(f"{pair.replacement}\n读取失败：{exc}")
+            overlay_var.set("无法生成叠图。")
+            original_image.configure(image="")
+            replacement_image.configure(image="")
+            overlay_image.configure(image="")
+            return
+
+        original_preview = _fit_preview(original, (490, 640))
+        replacement_preview = _fit_preview(replacement, (490, 640))
+        overlay_preview = _fit_preview(overlay, (490, 640))
+        state["original"] = ImageTk.PhotoImage(original_preview)
+        state["replacement"] = ImageTk.PhotoImage(replacement_preview)
+        state["overlay"] = ImageTk.PhotoImage(overlay_preview)
+        original_image.configure(image=state["original"])
+        replacement_image.configure(image=state["replacement"])
+        overlay_image.configure(image=state["overlay"])
         title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    ↑↓ 切换，Esc 关闭")
-        original_var.set(f"{pair.original.name}  {original_size[0]}x{original_size[1]}\n{pair.original}")
+        original_var.set(f"{pair.original.name}  {original.width}x{original.height}\n{pair.original}")
         replacement_var.set(
-            f"{pair.replacement.name}  {replacement_size[0]}x{replacement_size[1]}\n{pair.replacement}"
+            f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
+            f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
+        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；水平居中，顶部对齐。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)

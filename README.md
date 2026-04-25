@@ -60,7 +60,7 @@ python hir_cli.py remove-bg --source hadesExport
 python hir_cli.py preview --source hadesExport_去背景
 ```
 
-工具会按文件名匹配当前目录 `hadesExport` 里的同名原始导出图，并打开左右对比窗口。窗口内用上下键或左右键切换图片，按 Esc 关闭。
+工具会按文件名匹配当前目录 `hadesExport` 里的同名原始导出图，并打开三栏对比窗口：原始游戏资源、按游戏打包规则缩放后的替换效果、半透明叠图。窗口内用上下键或左右键切换图片，按 Esc 关闭。
 
 ## 生成并安装 Mod
 
