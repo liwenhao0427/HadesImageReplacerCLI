@@ -28,7 +28,7 @@ python hir_cli.py
 
 无参数启动会进入交互菜单。
 
-交互菜单支持上下键选择、回车确认，也保留数字快捷键。菜单里可以预览替换图片、直接启动游戏，或打开 `ReturnOfModding` Mod 目录。
+交互菜单支持上下键选择、回车确认，也保留数字快捷键。首次无缓存启动时会自动检测并缓存游戏目录一次；之后可以在菜单里手动设置游戏目录、预览替换图片、直接启动游戏，或打开 `ReturnOfModding` Mod 目录。
 
 ```powershell
 python hir_cli.py detect
@@ -60,7 +60,7 @@ python hir_cli.py remove-bg --source hadesExport
 python hir_cli.py preview --source hadesExport_去背景
 ```
 
-工具会按文件名匹配当前目录 `hadesExport` 里的同名原始导出图，并打开三栏对比窗口：原始游戏资源、按游戏打包规则缩放后的替换效果、半透明叠图。窗口内用上下键或左右键切换图片，按 Esc 关闭。
+工具会按文件名匹配当前目录 `hadesExport` 里的同名原始导出图，并打开三栏对比窗口：原始游戏资源、按游戏打包规则缩放后的替换效果、半透明叠图。窗口内用上下键或左右键切换图片，按 Esc 关闭。可预览数量取决于当前 `hadesExport` 中有多少同名原图；如果原图目录不完整，请先重新导出立绘资源。
 
 ## 生成并安装 Mod
 

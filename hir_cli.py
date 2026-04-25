@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.17"
+TOOL_VERSION = "0.1.18"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -60,6 +60,16 @@ class PreviewPair:
     filename: str
     original: Path
     replacement: Path
+
+
+@dataclass
+class PreviewSummary:
+    """记录预览匹配数量，便于提示用户缺少哪些基准原图。"""
+
+    pairs: list[PreviewPair]
+    replacement_count: int
+    original_count: int
+    skipped_count: int
 
 
 @contextmanager
@@ -206,6 +216,20 @@ def resolve_game_dir(config: dict, override: Path | None, save: bool = True) -> 
         config["game_dir"] = str(game_dir)
         _save_json(CONFIG_PATH, config)
     return game_dir
+
+
+def auto_detect_game_dir_once(config: dict) -> None:
+    """首次无缓存启动时自动检测并缓存游戏目录。"""
+    if config.get("game_dir") or config.get("auto_detect_done"):
+        return
+    found = detect_game_dirs()
+    config["auto_detect_done"] = True
+    if found:
+        config["game_dir"] = str(found[0])
+        print(f"首次启动已自动检测并缓存游戏目录：{found[0]}")
+    else:
+        print("首次启动未自动检测到 Hades II，可在菜单中手动设置游戏目录。")
+    _save_json(CONFIG_PATH, config)
 
 
 def _packages_dir(game_dir: Path, resolution: str) -> Path:
@@ -801,7 +825,7 @@ def _select_directory(title: str, initial: Path | None = None) -> Path | None:
     return Path(selected)
 
 
-def _collect_preview_pairs(source_dir: Path) -> list[PreviewPair]:
+def _collect_preview_pairs(source_dir: Path) -> PreviewSummary:
     """按文件名收集替换图和 hadesExport 原图的预览配对。"""
     if not source_dir.exists():
         raise SystemExit(f"目录不存在：{source_dir}")
@@ -809,12 +833,16 @@ def _collect_preview_pairs(source_dir: Path) -> list[PreviewPair]:
         raise SystemExit(f"缺少原始导出目录：{HADES_EXPORT_DIR}，请先导出立绘资源。")
 
     originals = {path.name: path for path in HADES_EXPORT_DIR.rglob("*.png")}
+    replacements = sorted(source_dir.rglob("*.png"))
     pairs: list[PreviewPair] = []
-    for replacement in sorted(source_dir.rglob("*.png")):
+    skipped_count = 0
+    for replacement in replacements:
         original = originals.get(replacement.name)
         if original is not None and not _same_file(original, replacement):
             pairs.append(PreviewPair(replacement.name, original, replacement))
-    return pairs
+        else:
+            skipped_count += 1
+    return PreviewSummary(pairs, len(replacements), len(originals), skipped_count)
 
 
 def _read_rgba_image(path: Path):
@@ -859,7 +887,15 @@ def _overlay_images(original, replacement):
 
 def preview_mod_images(source_dir: Path) -> None:
     """打开图片预览窗口，用上下键切换同名原图和替换图对比。"""
-    pairs = _collect_preview_pairs(source_dir)
+    summary = _collect_preview_pairs(source_dir)
+    pairs = summary.pairs
+    print(
+        "预览匹配："
+        f"替换目录 PNG {summary.replacement_count} 张，"
+        f"hadesExport 原图 {summary.original_count} 张，"
+        f"可预览 {len(pairs)} 张，"
+        f"跳过 {summary.skipped_count} 张。"
+    )
     if not pairs:
         raise SystemExit("没有找到与 hadesExport 同名的 PNG 图片。")
 
@@ -1053,7 +1089,6 @@ def interactive_menu(config: dict) -> None:
         ("remove_bg", "图片去背景"),
         ("open_game", "打开游戏"),
         ("open_mod_dir", "打开 Mod 目录"),
-        ("detect", "自动检测并缓存游戏目录"),
         ("set_game", "手动设置游戏目录"),
         ("namespace", "修改默认作者"),
         ("exit", "退出"),
@@ -1145,21 +1180,6 @@ def interactive_menu(config: dict) -> None:
                 open_mod_directory(game_dir)
             except SystemExit as exc:
                 print(exc)
-        elif choice == "detect":
-            found = detect_game_dirs()
-            if not found:
-                print("未检测到 Hades II。")
-                continue
-            for index, path in enumerate(found, start=1):
-                print(f"{index}. {path}")
-            selected = input("选择要缓存的序号，直接回车使用第一个: ").strip()
-            index = int(selected) if selected.isdigit() else 1
-            if index < 1 or index > len(found):
-                print("序号无效。")
-                continue
-            config["game_dir"] = str(found[index - 1])
-            _save_json(CONFIG_PATH, config)
-            print(f"已缓存：{found[index - 1]}")
         elif choice == "set_game":
             try:
                 selected = _select_directory("选择 Hades II 游戏目录或 Ship 目录")
@@ -1221,6 +1241,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     """命令行入口。"""
     config = _load_json(CONFIG_PATH)
+    if len(sys.argv) == 1:
+        auto_detect_game_dir_once(config)
     _print_config(config)
     if len(sys.argv) == 1:
         interactive_menu(config)
