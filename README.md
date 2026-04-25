@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt
 开发者重新打包可执行：
 
 ```powershell
-pyinstaller --noconfirm --clean --onefile --name HadesImageReplacer --add-data "vendor;vendor" --hidden-import lz4.block --hidden-import PIL.Image --hidden-import PyTexturePacker hir_cli.py
+pyinstaller --noconfirm --clean --onefile --name HadesImageReplacer --add-data "vendor;vendor" --hidden-import lz4.block --hidden-import PIL.Image --hidden-import PIL.ImageTk --hidden-import PyTexturePacker hir_cli.py
 ```
 
 ## 查看或设置游戏目录
@@ -28,7 +28,7 @@ python hir_cli.py
 
 无参数启动会进入交互菜单。
 
-交互菜单支持上下键选择、回车确认，也保留数字快捷键。菜单里可以直接启动游戏，或打开 `ReturnOfModding` Mod 目录。
+交互菜单支持上下键选择、回车确认，也保留数字快捷键。菜单里可以预览替换图片、直接启动游戏，或打开 `ReturnOfModding` Mod 目录。
 
 ```powershell
 python hir_cli.py detect
@@ -53,6 +53,14 @@ python hir_cli.py remove-bg --source hadesExport
 ```
 
 工具会按每张 PNG 左上角颜色作为背景色，把相近颜色设为透明，并生成同名后缀目录，例如 `hadesExport_去背景`。
+
+## 预览替换图片
+
+```powershell
+python hir_cli.py preview --source hadesExport_去背景
+```
+
+工具会按文件名匹配当前目录 `hadesExport` 里的同名原始导出图，并打开左右对比窗口。窗口内用上下键或左右键切换图片，按 Esc 关闭。
 
 ## 生成并安装 Mod
 

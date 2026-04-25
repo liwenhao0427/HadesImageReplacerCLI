@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.15"
+TOOL_VERSION = "0.1.16"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -51,6 +51,15 @@ class Replacement:
     source: Path
     target: Path
     original_height: int | None = None
+
+
+@dataclass
+class PreviewPair:
+    """记录一组同名原图和替换图，用于预览对比。"""
+
+    filename: str
+    original: Path
+    replacement: Path
 
 
 @contextmanager
@@ -111,6 +120,15 @@ def _load_pillow():
     except ModuleNotFoundError as exc:
         raise SystemExit("缺少 Pillow。请在本目录执行：python -m pip install -r requirements.txt") from exc
     return Image
+
+
+def _load_image_tk():
+    """按需加载 Pillow 的 Tk 图片桥接模块，用于预览窗口。"""
+    try:
+        from PIL import ImageTk
+    except ModuleNotFoundError as exc:
+        raise SystemExit("缺少 Pillow。请在本目录执行：python -m pip install -r requirements.txt") from exc
+    return ImageTk
 
 
 def _candidate_game_dirs() -> list[Path]:
@@ -782,6 +800,105 @@ def _select_directory(title: str, initial: Path | None = None) -> Path | None:
     return Path(selected)
 
 
+def _collect_preview_pairs(source_dir: Path) -> list[PreviewPair]:
+    """按文件名收集替换图和 hadesExport 原图的预览配对。"""
+    if not source_dir.exists():
+        raise SystemExit(f"目录不存在：{source_dir}")
+    if not HADES_EXPORT_DIR.exists():
+        raise SystemExit(f"缺少原始导出目录：{HADES_EXPORT_DIR}，请先导出立绘资源。")
+
+    originals = {path.name: path for path in HADES_EXPORT_DIR.rglob("*.png")}
+    pairs: list[PreviewPair] = []
+    for replacement in sorted(source_dir.rglob("*.png")):
+        original = originals.get(replacement.name)
+        if original is not None and not _same_file(original, replacement):
+            pairs.append(PreviewPair(replacement.name, original, replacement))
+    return pairs
+
+
+def _preview_image(path: Path, max_size: tuple[int, int]):
+    """读取图片并缩放到预览窗口可显示的尺寸。"""
+    Image = _load_pillow()
+    image = Image.open(path).convert("RGBA")
+    image.thumbnail(max_size)
+    return image
+
+
+def _image_size(path: Path) -> tuple[int, int]:
+    """读取图片原始宽高。"""
+    Image = _load_pillow()
+    with Image.open(path) as image:
+        return image.size
+
+
+def preview_mod_images(source_dir: Path) -> None:
+    """打开图片预览窗口，用上下键切换同名原图和替换图对比。"""
+    pairs = _collect_preview_pairs(source_dir)
+    if not pairs:
+        raise SystemExit("没有找到与 hadesExport 同名的 PNG 图片。")
+
+    ImageTk = _load_image_tk()
+    root = tk.Tk()
+    root.title(f"Hades Image Replacer 预览 - {source_dir.name}")
+    root.geometry("1180x820")
+
+    state = {"index": 0, "left": None, "right": None}
+    title_var = tk.StringVar()
+    original_var = tk.StringVar()
+    replacement_var = tk.StringVar()
+
+    tk.Label(root, textvariable=title_var, font=("Microsoft YaHei UI", 12, "bold")).grid(
+        row=0, column=0, columnspan=2, pady=(10, 6)
+    )
+    original_label = tk.Label(root, text="原始游戏资源", font=("Microsoft YaHei UI", 10, "bold"))
+    replacement_label = tk.Label(root, text="替换图片", font=("Microsoft YaHei UI", 10, "bold"))
+    original_label.grid(row=1, column=0)
+    replacement_label.grid(row=1, column=1)
+
+    left_image = tk.Label(root, bg="#222222", width=560, height=680)
+    right_image = tk.Label(root, bg="#222222", width=560, height=680)
+    left_image.grid(row=2, column=0, padx=10, sticky="nsew")
+    right_image.grid(row=2, column=1, padx=10, sticky="nsew")
+
+    tk.Label(root, textvariable=original_var, wraplength=540, justify="left").grid(
+        row=3, column=0, padx=10, pady=(6, 10), sticky="w"
+    )
+    tk.Label(root, textvariable=replacement_var, wraplength=540, justify="left").grid(
+        row=3, column=1, padx=10, pady=(6, 10), sticky="w"
+    )
+    root.grid_columnconfigure(0, weight=1)
+    root.grid_columnconfigure(1, weight=1)
+    root.grid_rowconfigure(2, weight=1)
+
+    def show(index: int) -> None:
+        pair = pairs[index]
+        left = _preview_image(pair.original, (540, 660))
+        right = _preview_image(pair.replacement, (540, 660))
+        original_size = _image_size(pair.original)
+        replacement_size = _image_size(pair.replacement)
+        state["left"] = ImageTk.PhotoImage(left)
+        state["right"] = ImageTk.PhotoImage(right)
+        left_image.configure(image=state["left"])
+        right_image.configure(image=state["right"])
+        title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    ↑↓ 切换，Esc 关闭")
+        original_var.set(f"{pair.original.name}  {original_size[0]}x{original_size[1]}\n{pair.original}")
+        replacement_var.set(
+            f"{pair.replacement.name}  {replacement_size[0]}x{replacement_size[1]}\n{pair.replacement}"
+        )
+
+    def move(step: int) -> None:
+        state["index"] = (int(state["index"]) + step) % len(pairs)
+        show(int(state["index"]))
+
+    root.bind("<Up>", lambda _event: move(-1))
+    root.bind("<Down>", lambda _event: move(1))
+    root.bind("<Left>", lambda _event: move(-1))
+    root.bind("<Right>", lambda _event: move(1))
+    root.bind("<Escape>", lambda _event: root.destroy())
+    show(0)
+    root.mainloop()
+
+
 def remove_backgrounds(source_dir: Path) -> Path:
     """按左上角背景色移除目录内 PNG 背景，并输出到同名后缀目录。"""
     Image = _load_pillow()
@@ -879,6 +996,7 @@ def interactive_menu(config: dict) -> None:
         ("export", "导出立绘资源"),
         ("build_install", "生成并安装资源替换 Mod"),
         ("build_only", "仅生成资源替换 Mod"),
+        ("preview", "预览替换图片"),
         ("remove_bg", "图片去背景"),
         ("open_game", "打开游戏"),
         ("open_mod_dir", "打开 Mod 目录"),
@@ -942,6 +1060,15 @@ def interactive_menu(config: dict) -> None:
                 )
             except ValueError as exc:
                 print(f"输入无效：{exc}")
+            except SystemExit as exc:
+                print(exc)
+        elif choice == "preview":
+            try:
+                source = _select_directory("选择要预览的替换资源目录", HADES_EXPORT_DIR)
+                if source is None:
+                    print("已取消。")
+                    continue
+                preview_mod_images(source)
             except SystemExit as exc:
                 print(exc)
         elif choice == "remove_bg":
@@ -1032,6 +1159,9 @@ def build_parser() -> argparse.ArgumentParser:
     remove_bg = subparsers.add_parser("remove-bg", help="按左上角背景色批量去背景。")
     remove_bg.add_argument("--source", type=Path, required=True, help="要处理的 PNG 目录。")
 
+    preview = subparsers.add_parser("preview", help="预览替换图片与 hadesExport 同名原图。")
+    preview.add_argument("--source", type=Path, required=True, help="要预览的 PNG 目录。")
+
     return parser
 
 
@@ -1069,6 +1199,8 @@ def main() -> None:
             install_mod(game_dir, mod_dir)
     elif args.command == "remove-bg":
         remove_backgrounds(args.source)
+    elif args.command == "preview":
+        preview_mod_images(args.source)
 
 
 if __name__ == "__main__":
