@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.26"
+TOOL_VERSION = "0.1.27"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -56,6 +56,7 @@ class Replacement:
 
     source: Path
     target: Path
+    original_width: int | None = None
     original_height: int | None = None
 
 
@@ -392,6 +393,7 @@ def _read_index_replacements(source_dir: Path, index_path: Path) -> list[Replace
                 Replacement(
                     source=source,
                     target=target,
+                    original_width=_read_optional_int(row.get("original_width")),
                     original_height=_read_optional_int(row.get("original_height")),
                 )
             )
@@ -444,37 +446,61 @@ def _same_file(left: Path, right: Path) -> bool:
         return False
 
 
-def _fallback_original_height(item: Replacement) -> int | None:
-    """从 hadesExport 同名原图读取旧索引缺失的原始高度。"""
+def _fallback_original_size(item: Replacement) -> tuple[int, int] | None:
+    """从 hadesExport 同名原图读取旧索引缺失的原始尺寸。"""
     reference = HADES_EXPORT_DIR / item.source.name
     if not reference.exists() or _same_file(reference, item.source):
         return None
     Image = _load_pillow()
     with Image.open(reference) as image:
-        return image.height
+        return image.width, image.height
+
+
+def _resize_to_original_canvas(image, width: int, height: int):
+    """按原图高度缩放后，居中放入原图同尺寸透明画布。"""
+    Image = _load_pillow()
+    if image.height != height:
+        new_width = max(1, round(image.width * height / image.height))
+        resampling = getattr(Image, "Resampling", Image).LANCZOS
+        image = image.resize((new_width, height), resampling)
+    else:
+        image = image.copy()
+
+    if image.width == width and image.height == height:
+        return image
+
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    source_left = max(0, (image.width - width) // 2)
+    source_right = min(image.width, source_left + width)
+    paste_x = max(0, (width - image.width) // 2)
+    canvas.alpha_composite(image.crop((source_left, 0, source_right, height)), (paste_x, 0))
+    return canvas
 
 
 def _copy_or_resize_replacement(item: Replacement, target: Path) -> bool:
-    """复制替换图；已知原始高度时按高度等比缩放。"""
-    original_height = item.original_height or _fallback_original_height(item)
-    if original_height is None:
+    """复制替换图；已知原始尺寸时输出为原图同尺寸。"""
+    original_size = None
+    if item.original_width is not None and item.original_height is not None:
+        original_size = (item.original_width, item.original_height)
+    else:
+        original_size = _fallback_original_size(item)
+    if original_size is None:
         shutil.copy2(item.source, target)
         return False
 
     Image = _load_pillow()
     with Image.open(item.source) as image:
-        if image.height == original_height:
+        width, height = original_size
+        if image.width == width and image.height == height:
             shutil.copy2(item.source, target)
             return False
-        new_width = max(1, round(image.width * original_height / image.height))
-        resampling = getattr(Image, "Resampling", Image).LANCZOS
-        resized = image.resize((new_width, original_height), resampling)
+        resized = _resize_to_original_canvas(image.convert("RGBA"), width, height)
         resized.save(target)
         return True
 
 
 def _copy_replacements(replacements: list[Replacement], work_dir: Path) -> None:
-    """复制替换图片到 deppth2 输入目录，并按原始高度等比校正尺寸。"""
+    """复制替换图片到 deppth2 输入目录，并校正为原始资源尺寸。"""
     if work_dir.exists():
         shutil.rmtree(work_dir)
     resized_count = 0
@@ -484,7 +510,7 @@ def _copy_replacements(replacements: list[Replacement], work_dir: Path) -> None:
         if _copy_or_resize_replacement(item, target):
             resized_count += 1
     if resized_count:
-        print(f"已按原始高度等比缩放 {resized_count} 张图片。")
+        print(f"已按原始尺寸校正 {resized_count} 张图片。")
 
 
 def _resource_path_for_lua(target: Path) -> str:
@@ -858,16 +884,6 @@ def _read_rgba_image(path: Path):
         return image.convert("RGBA")
 
 
-def _resize_to_height(image, height: int):
-    """按目标高度等比缩放图片，宽度自适应。"""
-    Image = _load_pillow()
-    if image.height == height:
-        return image.copy()
-    new_width = max(1, round(image.width * height / image.height))
-    resampling = getattr(Image, "Resampling", Image).LANCZOS
-    return image.resize((new_width, height), resampling)
-
-
 def _fit_preview(image, max_size: tuple[int, int]):
     """缩放图片副本到预览窗口可显示尺寸。"""
     preview = image.copy()
@@ -1181,7 +1197,7 @@ def preview_mod_images(source_dir: Path) -> None:
         return output
 
     def current_cropped_final():
-        """返回当前裁剪保存后在游戏内会显示的最终替换效果。"""
+        """返回当前裁剪保存后与原图同尺寸的最终替换效果。"""
         rect = state["crop_rect"]
         image = state["replacement_image"]
         original = state["original_image_data"]
@@ -1189,7 +1205,7 @@ def preview_mod_images(source_dir: Path) -> None:
             return None
         crop_box = canvas_to_image_rect(rect)
         cropped = crop_with_padding(image, crop_box)
-        return _resize_to_height(cropped, original.height)
+        return _resize_to_original_canvas(cropped, original.width, original.height)
 
     def show_overlay_image(image) -> None:
         """刷新右侧叠图区域。"""
@@ -1227,11 +1243,15 @@ def preview_mod_images(source_dir: Path) -> None:
         try:
             crop_box = canvas_to_image_rect(rect)
             pair = pairs[int(state["index"])]
+            original = state["original_image_data"]
+            if original is None:
+                return
             cropped = crop_with_padding(image, crop_box)
+            final_replacement = _resize_to_original_canvas(cropped, original.width, original.height)
             _backup_replacement_once(source_dir, pair.replacement)
-            cropped.save(pair.replacement)
+            final_replacement.save(pair.replacement)
             show(int(state["index"]))
-            overlay_var.set(f"已保存裁剪：{cropped.width}x{cropped.height}，原图已备份一次。")
+            overlay_var.set(f"已保存裁剪：{final_replacement.width}x{final_replacement.height}，原图已备份一次。")
         except Exception as exc:
             overlay_var.set(f"保存失败：{exc}")
 
@@ -1310,7 +1330,7 @@ def preview_mod_images(source_dir: Path) -> None:
         try:
             original = _read_rgba_image(pair.original)
             replacement_source = _read_rgba_image(pair.replacement)
-            replacement = _resize_to_height(replacement_source, original.height)
+            replacement = _resize_to_original_canvas(replacement_source, original.width, original.height)
             overlay = _overlay_images(original, replacement)
         except Exception as exc:
             title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    图片读取失败，方向键切换，Esc 关闭")
@@ -1357,7 +1377,7 @@ def preview_mod_images(source_dir: Path) -> None:
             f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
             f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
-        overlay_var.set("可在中间图拖拽裁剪框；白色区域表示超出原始画幅。")
+        overlay_var.set("可在中间图拖拽裁剪框；最终保存与原图分辨率完全一致。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)
