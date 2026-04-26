@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.19"
+TOOL_VERSION = "0.1.20"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -904,15 +904,6 @@ def _backup_replacement_once(source_dir: Path, image_path: Path) -> None:
     shutil.copy2(image_path, target)
 
 
-def _normalized_rect(start: tuple[int, int], end: tuple[int, int]) -> tuple[int, int, int, int]:
-    """把两个点转换为左上右下矩形。"""
-    left = min(start[0], end[0])
-    top = min(start[1], end[1])
-    right = max(start[0], end[0])
-    bottom = max(start[1], end[1])
-    return left, top, right, bottom
-
-
 def preview_mod_images(source_dir: Path) -> None:
     """打开图片预览窗口，用上下键切换同名原图和替换图对比。"""
     summary = _collect_preview_pairs(source_dir)
@@ -937,9 +928,13 @@ def preview_mod_images(source_dir: Path) -> None:
         "original": None,
         "replacement": None,
         "overlay": None,
+        "base_overlay_image": None,
+        "original_image_data": None,
         "replacement_image": None,
         "replacement_scale": 1.0,
         "replacement_offset": (0, 0),
+        "replacement_preview_size": (0, 0),
+        "crop_aspect": 1.0,
         "crop_rect": None,
         "drag_start": None,
         "rect_item": None,
@@ -996,6 +991,7 @@ def preview_mod_images(source_dir: Path) -> None:
             state["rect_item"] = replacement_image.create_rectangle(*rect, outline="#ffdd55", width=2)
             save_button.configure(state="normal")
             clear_button.configure(state="normal")
+            update_overlay_for_crop()
         else:
             save_button.configure(state="disabled")
             clear_button.configure(state="disabled")
@@ -1003,24 +999,40 @@ def preview_mod_images(source_dir: Path) -> None:
     def clear_crop() -> None:
         """清除当前裁剪框。"""
         set_crop_rect(None)
+        show_overlay_image(state["base_overlay_image"])
         overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；水平居中，顶部对齐。")
 
     def clamp_canvas_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         """把裁剪框限制在当前预览图范围内。"""
-        image = state["replacement_image"]
+        preview_width, preview_height = state["replacement_preview_size"]
         offset_x, offset_y = state["replacement_offset"]
-        if image is None:
+        if not preview_width or not preview_height:
             return rect
         min_x = int(offset_x)
         min_y = int(offset_y)
-        max_x = min_x + image.width
-        max_y = min_y + image.height
+        max_x = min_x + int(preview_width)
+        max_y = min_y + int(preview_height)
         left, top, right, bottom = rect
         width = max(1, right - left)
         height = max(1, bottom - top)
+        if width > max_x - min_x:
+            width = max_x - min_x
+        if height > max_y - min_y:
+            height = max_y - min_y
         left = min(max(left, min_x), max_x - width)
         top = min(max(top, min_y), max_y - height)
         return left, top, left + width, top + height
+
+    def aspect_canvas_rect(anchor: tuple[int, int], height: int, direction: tuple[int, int] = (1, 1)) -> tuple[int, int, int, int]:
+        """按原图宽高比和指定高度生成画布裁剪框。"""
+        aspect = float(state["crop_aspect"])
+        width = max(2, round(height * aspect))
+        height = max(2, int(height))
+        x_dir = -1 if direction[0] < 0 else 1
+        y_dir = -1 if direction[1] < 0 else 1
+        left = anchor[0] if x_dir > 0 else anchor[0] - width
+        top = anchor[1] if y_dir > 0 else anchor[1] - height
+        return clamp_canvas_rect((left, top, left + width, top + height))
 
     def canvas_to_image_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         """把预览画布裁剪框转换为游戏内替换效果图坐标。"""
@@ -1037,6 +1049,44 @@ def preview_mod_images(source_dir: Path) -> None:
         if image_right - image_left < 2 or image_bottom - image_top < 2:
             raise ValueError("裁剪区域太小。")
         return image_left, image_top, image_right, image_bottom
+
+    def current_cropped_final():
+        """返回当前裁剪保存后在游戏内会显示的最终替换效果。"""
+        rect = state["crop_rect"]
+        image = state["replacement_image"]
+        original = state["original_image_data"]
+        if rect is None or image is None or original is None:
+            return None
+        crop_box = canvas_to_image_rect(rect)
+        cropped = image.crop(crop_box)
+        return _resize_to_height(cropped, original.height)
+
+    def show_overlay_image(image) -> None:
+        """刷新右侧叠图区域。"""
+        if image is None:
+            overlay_image.configure(image="")
+            state["overlay"] = None
+            return
+        overlay_preview = _fit_preview(image, (490, 640))
+        state["overlay"] = ImageTk.PhotoImage(overlay_preview)
+        overlay_image.configure(image=state["overlay"])
+
+    def update_overlay_for_crop() -> None:
+        """按当前裁剪框实时刷新最终效果叠图。"""
+        original = state["original_image_data"]
+        if original is None:
+            return
+        try:
+            final_replacement = current_cropped_final()
+            if final_replacement is None:
+                return
+            show_overlay_image(_overlay_images(original, final_replacement))
+            overlay_var.set(
+                f"当前裁剪最终效果：{final_replacement.width}x{final_replacement.height}；"
+                "右侧已按保存后生成 Mod 的规则刷新。"
+            )
+        except Exception as exc:
+            overlay_var.set(f"叠图刷新失败：{exc}")
 
     def save_crop() -> None:
         """保存当前裁剪结果，覆盖替换图并保留一次备份。"""
@@ -1073,23 +1123,28 @@ def preview_mod_images(source_dir: Path) -> None:
             original_image.configure(image="")
             replacement_image.delete("all")
             overlay_image.configure(image="")
+            state["base_overlay_image"] = None
+            state["original_image_data"] = None
+            state["replacement_image"] = None
             set_crop_rect(None)
             return
 
         original_preview = _fit_preview(original, (490, 640))
         replacement_preview, replacement_scale = _preview_transform(replacement, (490, 640))
-        overlay_preview = _fit_preview(overlay, (490, 640))
         replacement_offset = ((500 - replacement_preview.width) // 2, (650 - replacement_preview.height) // 2)
         state["original"] = ImageTk.PhotoImage(original_preview)
         state["replacement"] = ImageTk.PhotoImage(replacement_preview)
-        state["overlay"] = ImageTk.PhotoImage(overlay_preview)
+        state["base_overlay_image"] = overlay
+        state["original_image_data"] = original
         state["replacement_image"] = replacement
         state["replacement_scale"] = replacement_scale
         state["replacement_offset"] = replacement_offset
+        state["replacement_preview_size"] = (replacement_preview.width, replacement_preview.height)
+        state["crop_aspect"] = original.width / original.height
         original_image.configure(image=state["original"])
         replacement_image.delete("all")
         replacement_image.create_image(*replacement_offset, anchor="nw", image=state["replacement"])
-        overlay_image.configure(image=state["overlay"])
+        show_overlay_image(overlay)
         set_crop_rect(None)
         title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    ↑↓ 切换，Esc 关闭")
         original_var.set(f"{pair.original.name}  {original.width}x{original.height}\n{pair.original}")
@@ -1117,17 +1172,37 @@ def preview_mod_images(source_dir: Path) -> None:
         if not nudge_crop(dx, dy):
             move(step)
 
+    def resize_crop(delta: int) -> None:
+        """按原图比例放大或缩小裁剪框。"""
+        rect = state["crop_rect"]
+        if rect is None:
+            return
+        left, top, right, bottom = rect
+        center = ((left + right) // 2, (top + bottom) // 2)
+        height = max(4, bottom - top + delta)
+        width = max(2, round(height * float(state["crop_aspect"])))
+        next_rect = (
+            center[0] - width // 2,
+            center[1] - height // 2,
+            center[0] - width // 2 + width,
+            center[1] - height // 2 + height,
+        )
+        set_crop_rect(clamp_canvas_rect(next_rect))
+
     def crop_drag_start(event) -> None:
         """开始拖拽裁剪框。"""
         state["drag_start"] = (event.x, event.y)
-        set_crop_rect((event.x, event.y, event.x, event.y))
+        default_height = max(4, int(state["replacement_preview_size"][1] or 4))
+        set_crop_rect(aspect_canvas_rect((event.x, event.y), default_height))
 
     def crop_drag_move(event) -> None:
-        """拖拽更新裁剪框。"""
+        """拖拽更新裁剪框位置和高度，宽度按原图比例同步变化。"""
         start = state["drag_start"]
         if start is None:
             return
-        set_crop_rect(clamp_canvas_rect(_normalized_rect(start, (event.x, event.y))))
+        height = max(4, abs(event.y - start[1]))
+        direction = (event.x - start[0], event.y - start[1])
+        set_crop_rect(aspect_canvas_rect(start, height, direction))
 
     def crop_drag_end(event) -> None:
         """结束拖拽裁剪框，过小则清除。"""
@@ -1135,7 +1210,9 @@ def preview_mod_images(source_dir: Path) -> None:
         state["drag_start"] = None
         if start is None:
             return
-        rect = clamp_canvas_rect(_normalized_rect(start, (event.x, event.y)))
+        height = max(4, abs(event.y - start[1]))
+        direction = (event.x - start[0], event.y - start[1])
+        rect = aspect_canvas_rect(start, height, direction)
         if rect[2] - rect[0] < 4 or rect[3] - rect[1] < 4:
             clear_crop()
             return
@@ -1148,6 +1225,9 @@ def preview_mod_images(source_dir: Path) -> None:
     root.bind("<Down>", lambda _event: handle_arrow(1, 0, 1))
     root.bind("<Left>", lambda _event: handle_arrow(-1, -1, 0))
     root.bind("<Right>", lambda _event: handle_arrow(1, 1, 0))
+    root.bind("+", lambda _event: resize_crop(6))
+    root.bind("=", lambda _event: resize_crop(6))
+    root.bind("-", lambda _event: resize_crop(-6))
     root.bind("<Escape>", lambda _event: root.destroy())
     show(0)
     root.mainloop()
