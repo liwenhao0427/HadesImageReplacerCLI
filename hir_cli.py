@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.25"
+TOOL_VERSION = "0.1.26"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -991,9 +991,9 @@ def preview_mod_images(source_dir: Path) -> None:
     original_image = tk.Label(root, bg="#ffffff", width=500, height=650)
     replacement_image = tk.Canvas(root, bg="#ffffff", width=500, height=650, highlightthickness=0)
     overlay_image = tk.Label(root, bg="#ffffff", width=500, height=650)
-    original_image.grid(row=2, column=0, padx=8, sticky="nsew")
-    replacement_image.grid(row=2, column=1, padx=8, sticky="nsew")
-    overlay_image.grid(row=2, column=2, padx=8, sticky="nsew")
+    original_image.grid(row=2, column=0, padx=8)
+    replacement_image.grid(row=2, column=1, padx=8)
+    overlay_image.grid(row=2, column=2, padx=8)
 
     tk.Label(root, textvariable=original_var, wraplength=480, justify="left").grid(
         row=3, column=0, padx=8, pady=(6, 10), sticky="w"
@@ -1043,7 +1043,7 @@ def preview_mod_images(source_dir: Path) -> None:
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
     root.grid_columnconfigure(2, weight=1)
-    root.grid_rowconfigure(2, weight=1)
+    root.grid_rowconfigure(2, weight=0)
 
     def canvas_to_image_point(x: int, y: int) -> tuple[int, int]:
         """把画布坐标转换为替换效果图像素坐标。"""
