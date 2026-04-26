@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.18"
+TOOL_VERSION = "0.1.19"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -33,6 +33,7 @@ HADES_EXPORT_DIR = SCRIPT_DIR / "hadesExport"
 GENERATED_MODS_DIR = SCRIPT_DIR / "generated_mods"
 DEFAULT_CODEC = "BC7"
 BACKGROUND_SUFFIX = "_去背景"
+PREVIEW_BACKUP_DIR = "_hir_preview_backup"
 BACKGROUND_THRESHOLD = 24
 PORTRAIT_PREFIXES = ("Portraits_", "CodexPortrait_")
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
@@ -869,6 +870,13 @@ def _fit_preview(image, max_size: tuple[int, int]):
     return preview
 
 
+def _preview_transform(image, max_size: tuple[int, int]) -> tuple[object, float]:
+    """返回预览图和原图到预览图的缩放比例。"""
+    preview = _fit_preview(image, max_size)
+    scale = preview.width / image.width
+    return preview, scale
+
+
 def _overlay_images(original, replacement):
     """把原图和按游戏规则缩放后的替换图居中叠加。"""
     Image = _load_pillow()
@@ -883,6 +891,26 @@ def _overlay_images(original, replacement):
     replacement_layer.alpha_composite(replacement, (replacement_x, 0))
     canvas = Image.alpha_composite(canvas, original_layer)
     return Image.blend(canvas, Image.alpha_composite(canvas, replacement_layer), 0.5)
+
+
+def _backup_replacement_once(source_dir: Path, image_path: Path) -> None:
+    """首次保存调整图前备份原替换图，避免二次保存覆盖备份。"""
+    backup_dir = source_dir.with_name(f"{source_dir.name}{PREVIEW_BACKUP_DIR}")
+    relative = image_path.relative_to(source_dir)
+    target = backup_dir / relative
+    if target.exists():
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(image_path, target)
+
+
+def _normalized_rect(start: tuple[int, int], end: tuple[int, int]) -> tuple[int, int, int, int]:
+    """把两个点转换为左上右下矩形。"""
+    left = min(start[0], end[0])
+    top = min(start[1], end[1])
+    right = max(start[0], end[0])
+    bottom = max(start[1], end[1])
+    return left, top, right, bottom
 
 
 def preview_mod_images(source_dir: Path) -> None:
@@ -904,7 +932,18 @@ def preview_mod_images(source_dir: Path) -> None:
     root.title(f"Hades Image Replacer 预览 - {source_dir.name}")
     root.geometry("1560x820")
 
-    state = {"index": 0, "original": None, "replacement": None, "overlay": None}
+    state = {
+        "index": 0,
+        "original": None,
+        "replacement": None,
+        "overlay": None,
+        "replacement_image": None,
+        "replacement_scale": 1.0,
+        "replacement_offset": (0, 0),
+        "crop_rect": None,
+        "drag_start": None,
+        "rect_item": None,
+    }
     title_var = tk.StringVar()
     original_var = tk.StringVar()
     replacement_var = tk.StringVar()
@@ -921,7 +960,7 @@ def preview_mod_images(source_dir: Path) -> None:
     overlay_label.grid(row=1, column=2)
 
     original_image = tk.Label(root, bg="#222222", width=500, height=650)
-    replacement_image = tk.Label(root, bg="#222222", width=500, height=650)
+    replacement_image = tk.Canvas(root, bg="#222222", width=500, height=650, highlightthickness=0)
     overlay_image = tk.Label(root, bg="#222222", width=500, height=650)
     original_image.grid(row=2, column=0, padx=8, sticky="nsew")
     replacement_image.grid(row=2, column=1, padx=8, sticky="nsew")
@@ -936,10 +975,88 @@ def preview_mod_images(source_dir: Path) -> None:
     tk.Label(root, textvariable=overlay_var, wraplength=480, justify="left").grid(
         row=3, column=2, padx=8, pady=(6, 10), sticky="w"
     )
+    actions = tk.Frame(root)
+    actions.grid(row=4, column=0, columnspan=3, pady=(0, 10))
+    save_button = tk.Button(actions, text="保存当前裁剪", state="disabled")
+    clear_button = tk.Button(actions, text="清除裁剪框", state="disabled")
+    save_button.grid(row=0, column=0, padx=8)
+    clear_button.grid(row=0, column=1, padx=8)
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
     root.grid_columnconfigure(2, weight=1)
     root.grid_rowconfigure(2, weight=1)
+
+    def set_crop_rect(rect: tuple[int, int, int, int] | None) -> None:
+        """更新裁剪框并同步按钮状态。"""
+        state["crop_rect"] = rect
+        if state["rect_item"] is not None:
+            replacement_image.delete(state["rect_item"])
+            state["rect_item"] = None
+        if rect is not None:
+            state["rect_item"] = replacement_image.create_rectangle(*rect, outline="#ffdd55", width=2)
+            save_button.configure(state="normal")
+            clear_button.configure(state="normal")
+        else:
+            save_button.configure(state="disabled")
+            clear_button.configure(state="disabled")
+
+    def clear_crop() -> None:
+        """清除当前裁剪框。"""
+        set_crop_rect(None)
+        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；水平居中，顶部对齐。")
+
+    def clamp_canvas_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        """把裁剪框限制在当前预览图范围内。"""
+        image = state["replacement_image"]
+        offset_x, offset_y = state["replacement_offset"]
+        if image is None:
+            return rect
+        min_x = int(offset_x)
+        min_y = int(offset_y)
+        max_x = min_x + image.width
+        max_y = min_y + image.height
+        left, top, right, bottom = rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        left = min(max(left, min_x), max_x - width)
+        top = min(max(top, min_y), max_y - height)
+        return left, top, left + width, top + height
+
+    def canvas_to_image_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        """把预览画布裁剪框转换为游戏内替换效果图坐标。"""
+        image = state["replacement_image"]
+        if image is None:
+            raise ValueError("当前没有可保存的替换图。")
+        scale = float(state["replacement_scale"])
+        offset_x, offset_y = state["replacement_offset"]
+        left, top, right, bottom = clamp_canvas_rect(rect)
+        image_left = max(0, round((left - offset_x) / scale))
+        image_top = max(0, round((top - offset_y) / scale))
+        image_right = min(image.width, round((right - offset_x) / scale))
+        image_bottom = min(image.height, round((bottom - offset_y) / scale))
+        if image_right - image_left < 2 or image_bottom - image_top < 2:
+            raise ValueError("裁剪区域太小。")
+        return image_left, image_top, image_right, image_bottom
+
+    def save_crop() -> None:
+        """保存当前裁剪结果，覆盖替换图并保留一次备份。"""
+        rect = state["crop_rect"]
+        image = state["replacement_image"]
+        if rect is None or image is None:
+            return
+        try:
+            crop_box = canvas_to_image_rect(rect)
+            pair = pairs[int(state["index"])]
+            cropped = image.crop(crop_box)
+            _backup_replacement_once(source_dir, pair.replacement)
+            cropped.save(pair.replacement)
+            show(int(state["index"]))
+            overlay_var.set(f"已保存裁剪：{cropped.width}x{cropped.height}，原图已备份一次。")
+        except Exception as exc:
+            overlay_var.set(f"保存失败：{exc}")
+
+    save_button.configure(command=save_crop)
+    clear_button.configure(command=clear_crop)
 
     def show(index: int) -> None:
         pair = pairs[index]
@@ -954,35 +1071,83 @@ def preview_mod_images(source_dir: Path) -> None:
             replacement_var.set(f"{pair.replacement}\n读取失败：{exc}")
             overlay_var.set("无法生成叠图。")
             original_image.configure(image="")
-            replacement_image.configure(image="")
+            replacement_image.delete("all")
             overlay_image.configure(image="")
+            set_crop_rect(None)
             return
 
         original_preview = _fit_preview(original, (490, 640))
-        replacement_preview = _fit_preview(replacement, (490, 640))
+        replacement_preview, replacement_scale = _preview_transform(replacement, (490, 640))
         overlay_preview = _fit_preview(overlay, (490, 640))
+        replacement_offset = ((500 - replacement_preview.width) // 2, (650 - replacement_preview.height) // 2)
         state["original"] = ImageTk.PhotoImage(original_preview)
         state["replacement"] = ImageTk.PhotoImage(replacement_preview)
         state["overlay"] = ImageTk.PhotoImage(overlay_preview)
+        state["replacement_image"] = replacement
+        state["replacement_scale"] = replacement_scale
+        state["replacement_offset"] = replacement_offset
         original_image.configure(image=state["original"])
-        replacement_image.configure(image=state["replacement"])
+        replacement_image.delete("all")
+        replacement_image.create_image(*replacement_offset, anchor="nw", image=state["replacement"])
         overlay_image.configure(image=state["overlay"])
+        set_crop_rect(None)
         title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    ↑↓ 切换，Esc 关闭")
         original_var.set(f"{pair.original.name}  {original.width}x{original.height}\n{pair.original}")
         replacement_var.set(
             f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
             f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
-        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；水平居中，顶部对齐。")
+        overlay_var.set("可在中间图拖拽矩形裁剪；有裁剪框时方向键移动裁剪框，点击保存覆盖替换图。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)
         show(int(state["index"]))
 
-    root.bind("<Up>", lambda _event: move(-1))
-    root.bind("<Down>", lambda _event: move(1))
-    root.bind("<Left>", lambda _event: move(-1))
-    root.bind("<Right>", lambda _event: move(1))
+    def nudge_crop(dx: int, dy: int) -> bool:
+        """方向键移动裁剪框；没有裁剪框时返回 False。"""
+        rect = state["crop_rect"]
+        if rect is None:
+            return False
+        left, top, right, bottom = rect
+        set_crop_rect(clamp_canvas_rect((left + dx, top + dy, right + dx, bottom + dy)))
+        return True
+
+    def handle_arrow(step: int, dx: int, dy: int) -> None:
+        """有裁剪框时移动裁剪框，否则切换图片。"""
+        if not nudge_crop(dx, dy):
+            move(step)
+
+    def crop_drag_start(event) -> None:
+        """开始拖拽裁剪框。"""
+        state["drag_start"] = (event.x, event.y)
+        set_crop_rect((event.x, event.y, event.x, event.y))
+
+    def crop_drag_move(event) -> None:
+        """拖拽更新裁剪框。"""
+        start = state["drag_start"]
+        if start is None:
+            return
+        set_crop_rect(clamp_canvas_rect(_normalized_rect(start, (event.x, event.y))))
+
+    def crop_drag_end(event) -> None:
+        """结束拖拽裁剪框，过小则清除。"""
+        start = state["drag_start"]
+        state["drag_start"] = None
+        if start is None:
+            return
+        rect = clamp_canvas_rect(_normalized_rect(start, (event.x, event.y)))
+        if rect[2] - rect[0] < 4 or rect[3] - rect[1] < 4:
+            clear_crop()
+            return
+        set_crop_rect(rect)
+
+    replacement_image.bind("<ButtonPress-1>", crop_drag_start)
+    replacement_image.bind("<B1-Motion>", crop_drag_move)
+    replacement_image.bind("<ButtonRelease-1>", crop_drag_end)
+    root.bind("<Up>", lambda _event: handle_arrow(-1, 0, -1))
+    root.bind("<Down>", lambda _event: handle_arrow(1, 0, 1))
+    root.bind("<Left>", lambda _event: handle_arrow(-1, -1, 0))
+    root.bind("<Right>", lambda _event: handle_arrow(1, 1, 0))
     root.bind("<Escape>", lambda _event: root.destroy())
     show(0)
     root.mainloop()
