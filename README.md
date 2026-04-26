@@ -76,6 +76,14 @@ python hir_cli.py import --source hadesExport --install
 
 生成 Mod 前，工具会把替换图处理成与原始导出图完全相同的分辨率：先按原图高度等比缩放，再居中放入原图同尺寸透明画布，超宽时从中间裁掉。新导出的 `_portrait_index.tsv` 会记录原始尺寸；旧索引缺少尺寸时，会回退读取当前 `hadesExport` 里的同名原图尺寸。
 
+每次生成 Mod 时，工具会在输出目录额外保留一份打包前中间图片：
+
+```text
+generated_mods\<作者-Mod名>\processed_images
+```
+
+这个目录的内容就是送进 deppth2 打包的 PNG。目录内的 `_processed_images.tsv` 会记录替换图原始尺寸、处理后尺寸、同名游戏原图尺寸和 `OK` / `MISMATCH` 状态，方便用预览功能或图片查看器核对。
+
 ```text
 Hades II\Ship\ReturnOfModding\plugins\<作者-Mod名>
 Hades II\Ship\ReturnOfModding\plugins_data\<作者-Mod名>

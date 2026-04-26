@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.27"
+TOOL_VERSION = "0.1.28"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -449,7 +449,7 @@ def _same_file(left: Path, right: Path) -> bool:
 def _fallback_original_size(item: Replacement) -> tuple[int, int] | None:
     """从 hadesExport 同名原图读取旧索引缺失的原始尺寸。"""
     reference = HADES_EXPORT_DIR / item.source.name
-    if not reference.exists() or _same_file(reference, item.source):
+    if not reference.exists():
         return None
     Image = _load_pillow()
     with Image.open(reference) as image:
@@ -477,40 +477,87 @@ def _resize_to_original_canvas(image, width: int, height: int):
     return canvas
 
 
-def _copy_or_resize_replacement(item: Replacement, target: Path) -> bool:
-    """复制替换图；已知原始尺寸时输出为原图同尺寸。"""
+def _copy_or_resize_replacement(item: Replacement, target: Path) -> tuple[bool, tuple[int, int], tuple[int, int], tuple[int, int] | None]:
+    """复制替换图；已知原始尺寸时输出为原图同尺寸，并返回尺寸记录。"""
     original_size = None
     if item.original_width is not None and item.original_height is not None:
         original_size = (item.original_width, item.original_height)
     else:
         original_size = _fallback_original_size(item)
-    if original_size is None:
-        shutil.copy2(item.source, target)
-        return False
 
     Image = _load_pillow()
     with Image.open(item.source) as image:
+        source_size = (image.width, image.height)
+        if original_size is None:
+            shutil.copy2(item.source, target)
+            return False, source_size, source_size, None
         width, height = original_size
         if image.width == width and image.height == height:
             shutil.copy2(item.source, target)
-            return False
+            return False, source_size, source_size, original_size
         resized = _resize_to_original_canvas(image.convert("RGBA"), width, height)
         resized.save(target)
-        return True
+        return True, source_size, (resized.width, resized.height), original_size
 
 
-def _copy_replacements(replacements: list[Replacement], work_dir: Path) -> None:
+def _copy_replacements(replacements: list[Replacement], work_dir: Path, processed_dir: Path | None = None) -> None:
     """复制替换图片到 deppth2 输入目录，并校正为原始资源尺寸。"""
     if work_dir.exists():
         shutil.rmtree(work_dir)
+    if processed_dir is not None and processed_dir.exists():
+        shutil.rmtree(processed_dir)
     resized_count = 0
+    rows: list[list[str]] = []
     for item in replacements:
         target = work_dir / item.target
         target.parent.mkdir(parents=True, exist_ok=True)
-        if _copy_or_resize_replacement(item, target):
+        resized, source_size, output_size, original_size = _copy_or_resize_replacement(item, target)
+        if resized:
             resized_count += 1
+        rows.append(
+            [
+                item.source.name,
+                item.target.as_posix(),
+                str(source_size[0]),
+                str(source_size[1]),
+                str(output_size[0]),
+                str(output_size[1]),
+                "" if original_size is None else str(original_size[0]),
+                "" if original_size is None else str(original_size[1]),
+                "UNKNOWN" if original_size is None else ("OK" if output_size == original_size else "MISMATCH"),
+            ]
+        )
+    if processed_dir is not None:
+        shutil.copytree(work_dir, processed_dir)
+        report_path = processed_dir / "_processed_images.tsv"
+        with report_path.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.writer(file, delimiter="\t")
+            writer.writerow(
+                [
+                    "filename",
+                    "target",
+                    "source_width",
+                    "source_height",
+                    "output_width",
+                    "output_height",
+                    "original_width",
+                    "original_height",
+                    "status",
+                ]
+            )
+            writer.writerows(rows)
+    bad_rows = [row for row in rows if row[-1] != "OK"]
+    if bad_rows:
+        preview = "\n".join(f"{row[0]}\t{row[-1]}" for row in bad_rows[:10])
+        raise SystemExit(
+            "存在无法确认或不匹配原始尺寸的图片，已停止打包。"
+            f"\n请检查中间产物报告：{processed_dir / '_processed_images.tsv' if processed_dir is not None else work_dir}"
+            f"\n{preview}"
+        )
     if resized_count:
         print(f"已按原始尺寸校正 {resized_count} 张图片。")
+    if processed_dir is not None:
+        print(f"已保存打包前中间图片：{processed_dir.resolve()}")
 
 
 def _resource_path_for_lua(target: Path) -> str:
@@ -667,6 +714,7 @@ def build_mod(
     mod_dir = output_root / guid
     plugin_dir = mod_dir / "plugins" / guid
     plugin_data_dir = mod_dir / "plugins_data" / guid
+    processed_dir = mod_dir / "processed_images"
     work_dir = output_root / "_work" / guid
 
     replacements = collect_replacements(source_dir)
@@ -674,7 +722,7 @@ def build_mod(
         shutil.rmtree(mod_dir)
     plugin_dir.mkdir(parents=True, exist_ok=True)
     plugin_data_dir.mkdir(parents=True, exist_ok=True)
-    _copy_replacements(replacements, work_dir)
+    _copy_replacements(replacements, work_dir, processed_dir)
     _write_mod_files(plugin_dir, namespace, mod_name, guid, replacements)
 
     with _pushd(plugin_data_dir):
