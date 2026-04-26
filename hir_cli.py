@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.22"
+TOOL_VERSION = "0.1.23"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -887,11 +887,15 @@ def _overlay_images(original, replacement):
     Image = _load_pillow()
     width = max(original.width, replacement.width)
     height = max(original.height, replacement.height)
-    canvas = Image.new("RGBA", (width, height), (32, 32, 32, 255))
+    canvas = Image.new("RGBA", (width, height), (92, 35, 65, 255))
     original_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     replacement_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     original_x = (width - original.width) // 2
     replacement_x = (width - replacement.width) // 2
+    canvas.alpha_composite(
+        Image.new("RGBA", (original.width, original.height), (32, 32, 32, 255)),
+        (original_x, 0),
+    )
     original_layer.alpha_composite(original, (original_x, 0))
     replacement_layer.alpha_composite(replacement, (replacement_x, 0))
     canvas = Image.alpha_composite(canvas, original_layer)
@@ -926,7 +930,7 @@ def preview_mod_images(source_dir: Path) -> None:
     ImageTk = _load_image_tk()
     root = tk.Tk()
     root.title(f"Hades Image Replacer 预览 - {source_dir.name}")
-    root.geometry("1560x820")
+    root.geometry("1560x860")
 
     state = {
         "index": 0,
@@ -1012,6 +1016,13 @@ def preview_mod_images(source_dir: Path) -> None:
     y_slider = tk.Scale(sliders, from_=0, to=0, orient="horizontal", showvalue=False, state="disabled")
     y_slider.grid(row=1, column=1, sticky="ew")
     sliders.grid_columnconfigure(1, weight=1)
+    help_text = (
+        "按键：无裁剪框时方向键切换图片；有裁剪框时方向键按角色移动方向调整位置，"
+        "长按逐步加速；+/- 调整裁剪框大小；Esc 关闭。叠图紫红底色表示超出原始游戏画幅的区域。"
+    )
+    tk.Label(root, text=help_text, wraplength=1480, justify="left", fg="#555555").grid(
+        row=6, column=0, columnspan=3, sticky="w", padx=24, pady=(0, 10)
+    )
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
     root.grid_columnconfigure(2, weight=1)
@@ -1097,7 +1108,7 @@ def preview_mod_images(source_dir: Path) -> None:
         """清除当前裁剪框。"""
         set_crop_rect(None)
         show_overlay_image(state["base_overlay_image"])
-        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；水平居中，顶部对齐。")
+        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；紫红色表示超出原始画幅。")
 
     def clamp_canvas_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         """规范裁剪框尺寸，允许超出图片和画布范围。"""
@@ -1285,7 +1296,7 @@ def preview_mod_images(source_dir: Path) -> None:
             replacement = _resize_to_height(replacement_source, original.height)
             overlay = _overlay_images(original, replacement)
         except Exception as exc:
-            title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    图片读取失败，↑↓ 切换，Esc 关闭")
+            title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    图片读取失败，方向键切换，Esc 关闭")
             original_var.set(f"{pair.original}\n读取失败：{exc}")
             replacement_var.set(f"{pair.replacement}\n读取失败：{exc}")
             overlay_var.set("无法生成叠图。")
@@ -1317,13 +1328,13 @@ def preview_mod_images(source_dir: Path) -> None:
         replacement_image.create_image(*replacement_offset, anchor="nw", image=state["replacement"])
         show_overlay_image(overlay)
         set_crop_rect(None)
-        title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    ↑↓ 切换，Esc 关闭")
+        title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    方向键切换；裁剪后方向键移动角色；Esc 关闭")
         original_var.set(f"{pair.original.name}  {original.width}x{original.height}\n{pair.original}")
         replacement_var.set(
             f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
             f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
-        overlay_var.set("可在中间图拖拽裁剪框；允许超出图片，超出部分保存为透明。")
+        overlay_var.set("可在中间图拖拽裁剪框；紫红色叠图区域表示超出原始画幅。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)
@@ -1350,13 +1361,13 @@ def preview_mod_images(source_dir: Path) -> None:
             return
         step = accelerated_step()
         if arrow == "up":
-            nudge_crop(0, -step)
-        elif arrow == "down":
             nudge_crop(0, step)
+        elif arrow == "down":
+            nudge_crop(0, -step)
         elif arrow == "left":
-            nudge_crop(-step, 0)
-        elif arrow == "right":
             nudge_crop(step, 0)
+        elif arrow == "right":
+            nudge_crop(-step, 0)
         state["held_ticks"] = int(state["held_ticks"]) + 1
         state["held_after_id"] = root.after(PREVIEW_NUDGE_INTERVAL_MS, held_arrow_tick)
 
@@ -1434,10 +1445,10 @@ def preview_mod_images(source_dir: Path) -> None:
     replacement_image.bind("<ButtonPress-1>", crop_drag_start)
     replacement_image.bind("<B1-Motion>", crop_drag_move)
     replacement_image.bind("<ButtonRelease-1>", crop_drag_end)
-    root.bind("<KeyPress-Up>", lambda _event: arrow_press("up", -1, 0, -1))
-    root.bind("<KeyPress-Down>", lambda _event: arrow_press("down", 1, 0, 1))
-    root.bind("<KeyPress-Left>", lambda _event: arrow_press("left", -1, -1, 0))
-    root.bind("<KeyPress-Right>", lambda _event: arrow_press("right", 1, 1, 0))
+    root.bind("<KeyPress-Up>", lambda _event: arrow_press("up", -1, 0, 1))
+    root.bind("<KeyPress-Down>", lambda _event: arrow_press("down", 1, 0, -1))
+    root.bind("<KeyPress-Left>", lambda _event: arrow_press("left", -1, 1, 0))
+    root.bind("<KeyPress-Right>", lambda _event: arrow_press("right", 1, -1, 0))
     root.bind("<KeyRelease-Up>", lambda _event: arrow_release("up"))
     root.bind("<KeyRelease-Down>", lambda _event: arrow_release("down"))
     root.bind("<KeyRelease-Left>", lambda _event: arrow_release("left"))
