@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.21"
+TOOL_VERSION = "0.1.22"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -34,6 +34,11 @@ GENERATED_MODS_DIR = SCRIPT_DIR / "generated_mods"
 DEFAULT_CODEC = "BC7"
 BACKGROUND_SUFFIX = "_去背景"
 PREVIEW_BACKUP_DIR = "_hir_preview_backup"
+PREVIEW_NUDGE_STEP = 2
+PREVIEW_NUDGE_MAX_STEP = 32
+PREVIEW_NUDGE_INTERVAL_MS = 35
+PREVIEW_RESIZE_STEP = 24
+PREVIEW_OVERLAY_DELAY_MS = 45
 BACKGROUND_THRESHOLD = 24
 PORTRAIT_PREFIXES = ("Portraits_", "CodexPortrait_")
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
@@ -938,12 +943,19 @@ def preview_mod_images(source_dir: Path) -> None:
         "crop_rect": None,
         "drag_start": None,
         "rect_item": None,
+        "syncing_controls": False,
+        "overlay_after_id": None,
+        "held_arrow": None,
+        "held_ticks": 0,
+        "held_after_id": None,
     }
     title_var = tk.StringVar()
     original_var = tk.StringVar()
     replacement_var = tk.StringVar()
     overlay_var = tk.StringVar()
     crop_height_var = tk.StringVar()
+    crop_x_var = tk.StringVar()
+    crop_y_var = tk.StringVar()
 
     tk.Label(root, textvariable=title_var, font=("Microsoft YaHei UI", 12, "bold")).grid(
         row=0, column=0, columnspan=3, pady=(10, 6)
@@ -977,15 +989,84 @@ def preview_mod_images(source_dir: Path) -> None:
     clear_button = tk.Button(actions, text="清除裁剪框", state="disabled")
     height_entry = tk.Entry(actions, textvariable=crop_height_var, width=8)
     height_button = tk.Button(actions, text="应用高度", state="disabled")
+    x_entry = tk.Entry(actions, textvariable=crop_x_var, width=8)
+    y_entry = tk.Entry(actions, textvariable=crop_y_var, width=8)
+    xy_button = tk.Button(actions, text="应用位置", state="disabled")
     save_button.grid(row=0, column=0, padx=8)
     clear_button.grid(row=0, column=1, padx=8)
     tk.Label(actions, text="高度(px)").grid(row=0, column=2, padx=(16, 4))
     height_entry.grid(row=0, column=3, padx=4)
     height_button.grid(row=0, column=4, padx=8)
+    tk.Label(actions, text="X").grid(row=0, column=5, padx=(16, 4))
+    x_entry.grid(row=0, column=6, padx=4)
+    tk.Label(actions, text="Y").grid(row=0, column=7, padx=(8, 4))
+    y_entry.grid(row=0, column=8, padx=4)
+    xy_button.grid(row=0, column=9, padx=8)
+
+    sliders = tk.Frame(root)
+    sliders.grid(row=5, column=0, columnspan=3, sticky="ew", padx=24, pady=(0, 10))
+    tk.Label(sliders, text="X").grid(row=0, column=0, padx=(0, 6))
+    x_slider = tk.Scale(sliders, from_=0, to=0, orient="horizontal", showvalue=False, state="disabled")
+    x_slider.grid(row=0, column=1, sticky="ew")
+    tk.Label(sliders, text="Y").grid(row=1, column=0, padx=(0, 6))
+    y_slider = tk.Scale(sliders, from_=0, to=0, orient="horizontal", showvalue=False, state="disabled")
+    y_slider.grid(row=1, column=1, sticky="ew")
+    sliders.grid_columnconfigure(1, weight=1)
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
     root.grid_columnconfigure(2, weight=1)
     root.grid_rowconfigure(2, weight=1)
+
+    def canvas_to_image_point(x: int, y: int) -> tuple[int, int]:
+        """把画布坐标转换为替换效果图像素坐标。"""
+        scale = float(state["replacement_scale"])
+        offset_x, offset_y = state["replacement_offset"]
+        return round((x - offset_x) / scale), round((y - offset_y) / scale)
+
+    def image_to_canvas_point(x: int, y: int) -> tuple[int, int]:
+        """把替换效果图像素坐标转换为画布坐标。"""
+        scale = float(state["replacement_scale"])
+        offset_x, offset_y = state["replacement_offset"]
+        return round(x * scale + offset_x), round(y * scale + offset_y)
+
+    def crop_center_image(rect: tuple[int, int, int, int]) -> tuple[int, int]:
+        """返回裁剪框中心在替换效果图里的像素坐标。"""
+        left, top, right, bottom = rect
+        return canvas_to_image_point((left + right) // 2, (top + bottom) // 2)
+
+    def configure_position_controls(image) -> None:
+        """按当前图片尺寸配置 X/Y 滑条范围。"""
+        if image is None:
+            x_slider.configure(state="disabled", from_=0, to=0)
+            y_slider.configure(state="disabled", from_=0, to=0)
+            return
+        x_slider.configure(from_=-image.width, to=image.width * 2)
+        y_slider.configure(from_=-image.height, to=image.height * 2)
+
+    def sync_position_controls(rect: tuple[int, int, int, int] | None) -> None:
+        """同步 X/Y/高度输入框和滑条，不触发位置变更。"""
+        state["syncing_controls"] = True
+        try:
+            if rect is None:
+                crop_height_var.set("")
+                crop_x_var.set("")
+                crop_y_var.set("")
+                return
+            scale = float(state["replacement_scale"])
+            crop_height_var.set(str(max(1, round((rect[3] - rect[1]) / scale))))
+            center_x, center_y = crop_center_image(rect)
+            crop_x_var.set(str(center_x))
+            crop_y_var.set(str(center_y))
+            x_slider.set(center_x)
+            y_slider.set(center_y)
+        finally:
+            state["syncing_controls"] = False
+
+    def schedule_overlay_update() -> None:
+        """合并高频移动事件，延迟刷新右侧叠图，避免按键排队卡顿。"""
+        if state["overlay_after_id"] is not None:
+            root.after_cancel(state["overlay_after_id"])
+        state["overlay_after_id"] = root.after(PREVIEW_OVERLAY_DELAY_MS, update_overlay_for_crop)
 
     def set_crop_rect(rect: tuple[int, int, int, int] | None) -> None:
         """更新裁剪框并同步按钮状态。"""
@@ -998,14 +1079,19 @@ def preview_mod_images(source_dir: Path) -> None:
             save_button.configure(state="normal")
             clear_button.configure(state="normal")
             height_button.configure(state="normal")
-            scale = float(state["replacement_scale"])
-            crop_height_var.set(str(max(1, round((rect[3] - rect[1]) / scale))))
-            update_overlay_for_crop()
+            xy_button.configure(state="normal")
+            x_slider.configure(state="normal")
+            y_slider.configure(state="normal")
+            sync_position_controls(rect)
+            schedule_overlay_update()
         else:
             save_button.configure(state="disabled")
             clear_button.configure(state="disabled")
             height_button.configure(state="disabled")
-            crop_height_var.set("")
+            xy_button.configure(state="disabled")
+            x_slider.configure(state="disabled")
+            y_slider.configure(state="disabled")
+            sync_position_controls(None)
 
     def clear_crop() -> None:
         """清除当前裁剪框。"""
@@ -1151,6 +1237,46 @@ def preview_mod_images(source_dir: Path) -> None:
     height_button.configure(command=apply_crop_height)
     height_entry.bind("<Return>", lambda _event: apply_crop_height())
 
+    def move_crop_center_to(image_x: int, image_y: int) -> None:
+        """移动裁剪框中心到指定替换效果图像素坐标。"""
+        rect = state["crop_rect"]
+        if rect is None:
+            return
+        left, top, right, bottom = rect
+        width = right - left
+        height = bottom - top
+        center_x, center_y = image_to_canvas_point(image_x, image_y)
+        set_crop_rect(
+            (
+                center_x - width // 2,
+                center_y - height // 2,
+                center_x - width // 2 + width,
+                center_y - height // 2 + height,
+            )
+        )
+
+    def apply_crop_position() -> None:
+        """按用户输入的 X/Y 像素坐标移动裁剪框中心。"""
+        try:
+            image_x = int(crop_x_var.get().strip())
+            image_y = int(crop_y_var.get().strip())
+        except ValueError:
+            overlay_var.set("X/Y 必须是整数像素。")
+            return
+        move_crop_center_to(image_x, image_y)
+
+    def slider_position_changed(_value: str) -> None:
+        """拖动滑条时实时移动裁剪框中心。"""
+        if state["syncing_controls"] or state["crop_rect"] is None:
+            return
+        move_crop_center_to(int(x_slider.get()), int(y_slider.get()))
+
+    xy_button.configure(command=apply_crop_position)
+    x_entry.bind("<Return>", lambda _event: apply_crop_position())
+    y_entry.bind("<Return>", lambda _event: apply_crop_position())
+    x_slider.configure(command=slider_position_changed)
+    y_slider.configure(command=slider_position_changed)
+
     def show(index: int) -> None:
         pair = pairs[index]
         try:
@@ -1169,6 +1295,7 @@ def preview_mod_images(source_dir: Path) -> None:
             state["base_overlay_image"] = None
             state["original_image_data"] = None
             state["replacement_image"] = None
+            configure_position_controls(None)
             set_crop_rect(None)
             return
 
@@ -1184,6 +1311,7 @@ def preview_mod_images(source_dir: Path) -> None:
         state["replacement_offset"] = replacement_offset
         state["replacement_preview_size"] = (replacement_preview.width, replacement_preview.height)
         state["crop_aspect"] = original.width / original.height
+        configure_position_controls(replacement)
         original_image.configure(image=state["original"])
         replacement_image.delete("all")
         replacement_image.create_image(*replacement_offset, anchor="nw", image=state["replacement"])
@@ -1210,10 +1338,52 @@ def preview_mod_images(source_dir: Path) -> None:
         set_crop_rect(clamp_canvas_rect((left + dx, top + dy, right + dx, bottom + dy)))
         return True
 
-    def handle_arrow(step: int, dx: int, dy: int) -> None:
-        """有裁剪框时移动裁剪框，否则切换图片。"""
-        if not nudge_crop(dx, dy):
-            move(step)
+    def accelerated_step() -> int:
+        """根据长按时间计算当前移动步进。"""
+        return min(PREVIEW_NUDGE_MAX_STEP, PREVIEW_NUDGE_STEP + int(state["held_ticks"]) // 4)
+
+    def held_arrow_tick() -> None:
+        """方向键长按移动循环，松开即停止。"""
+        arrow = state["held_arrow"]
+        if arrow is None:
+            state["held_after_id"] = None
+            return
+        step = accelerated_step()
+        if arrow == "up":
+            nudge_crop(0, -step)
+        elif arrow == "down":
+            nudge_crop(0, step)
+        elif arrow == "left":
+            nudge_crop(-step, 0)
+        elif arrow == "right":
+            nudge_crop(step, 0)
+        state["held_ticks"] = int(state["held_ticks"]) + 1
+        state["held_after_id"] = root.after(PREVIEW_NUDGE_INTERVAL_MS, held_arrow_tick)
+
+    def arrow_press(name: str, fallback_step: int, dx: int, dy: int) -> str:
+        """处理方向键按下：有裁剪框时启动长按移动，否则切图。"""
+        if state["crop_rect"] is None:
+            move(fallback_step)
+            return "break"
+        if state["held_arrow"] != name:
+            state["held_arrow"] = name
+            state["held_ticks"] = 0
+            if state["held_after_id"] is not None:
+                root.after_cancel(state["held_after_id"])
+                state["held_after_id"] = None
+            nudge_crop(dx * PREVIEW_NUDGE_STEP, dy * PREVIEW_NUDGE_STEP)
+            state["held_after_id"] = root.after(PREVIEW_NUDGE_INTERVAL_MS, held_arrow_tick)
+        return "break"
+
+    def arrow_release(name: str) -> str:
+        """处理方向键松开，停止长按移动。"""
+        if state["held_arrow"] == name:
+            state["held_arrow"] = None
+            state["held_ticks"] = 0
+            if state["held_after_id"] is not None:
+                root.after_cancel(state["held_after_id"])
+                state["held_after_id"] = None
+        return "break"
 
     def resize_crop(delta: int) -> None:
         """按原图比例放大或缩小裁剪框。"""
@@ -1264,13 +1434,17 @@ def preview_mod_images(source_dir: Path) -> None:
     replacement_image.bind("<ButtonPress-1>", crop_drag_start)
     replacement_image.bind("<B1-Motion>", crop_drag_move)
     replacement_image.bind("<ButtonRelease-1>", crop_drag_end)
-    root.bind("<Up>", lambda _event: handle_arrow(-1, 0, -1))
-    root.bind("<Down>", lambda _event: handle_arrow(1, 0, 1))
-    root.bind("<Left>", lambda _event: handle_arrow(-1, -1, 0))
-    root.bind("<Right>", lambda _event: handle_arrow(1, 1, 0))
-    root.bind("+", lambda _event: resize_crop(6))
-    root.bind("=", lambda _event: resize_crop(6))
-    root.bind("-", lambda _event: resize_crop(-6))
+    root.bind("<KeyPress-Up>", lambda _event: arrow_press("up", -1, 0, -1))
+    root.bind("<KeyPress-Down>", lambda _event: arrow_press("down", 1, 0, 1))
+    root.bind("<KeyPress-Left>", lambda _event: arrow_press("left", -1, -1, 0))
+    root.bind("<KeyPress-Right>", lambda _event: arrow_press("right", 1, 1, 0))
+    root.bind("<KeyRelease-Up>", lambda _event: arrow_release("up"))
+    root.bind("<KeyRelease-Down>", lambda _event: arrow_release("down"))
+    root.bind("<KeyRelease-Left>", lambda _event: arrow_release("left"))
+    root.bind("<KeyRelease-Right>", lambda _event: arrow_release("right"))
+    root.bind("+", lambda _event: resize_crop(PREVIEW_RESIZE_STEP))
+    root.bind("=", lambda _event: resize_crop(PREVIEW_RESIZE_STEP))
+    root.bind("-", lambda _event: resize_crop(-PREVIEW_RESIZE_STEP))
     root.bind("<Escape>", lambda _event: root.destroy())
     show(0)
     root.mainloop()
