@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.20"
+TOOL_VERSION = "0.1.21"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -943,6 +943,7 @@ def preview_mod_images(source_dir: Path) -> None:
     original_var = tk.StringVar()
     replacement_var = tk.StringVar()
     overlay_var = tk.StringVar()
+    crop_height_var = tk.StringVar()
 
     tk.Label(root, textvariable=title_var, font=("Microsoft YaHei UI", 12, "bold")).grid(
         row=0, column=0, columnspan=3, pady=(10, 6)
@@ -974,8 +975,13 @@ def preview_mod_images(source_dir: Path) -> None:
     actions.grid(row=4, column=0, columnspan=3, pady=(0, 10))
     save_button = tk.Button(actions, text="保存当前裁剪", state="disabled")
     clear_button = tk.Button(actions, text="清除裁剪框", state="disabled")
+    height_entry = tk.Entry(actions, textvariable=crop_height_var, width=8)
+    height_button = tk.Button(actions, text="应用高度", state="disabled")
     save_button.grid(row=0, column=0, padx=8)
     clear_button.grid(row=0, column=1, padx=8)
+    tk.Label(actions, text="高度(px)").grid(row=0, column=2, padx=(16, 4))
+    height_entry.grid(row=0, column=3, padx=4)
+    height_button.grid(row=0, column=4, padx=8)
     root.grid_columnconfigure(0, weight=1)
     root.grid_columnconfigure(1, weight=1)
     root.grid_columnconfigure(2, weight=1)
@@ -991,10 +997,15 @@ def preview_mod_images(source_dir: Path) -> None:
             state["rect_item"] = replacement_image.create_rectangle(*rect, outline="#ffdd55", width=2)
             save_button.configure(state="normal")
             clear_button.configure(state="normal")
+            height_button.configure(state="normal")
+            scale = float(state["replacement_scale"])
+            crop_height_var.set(str(max(1, round((rect[3] - rect[1]) / scale))))
             update_overlay_for_crop()
         else:
             save_button.configure(state="disabled")
             clear_button.configure(state="disabled")
+            height_button.configure(state="disabled")
+            crop_height_var.set("")
 
     def clear_crop() -> None:
         """清除当前裁剪框。"""
@@ -1003,24 +1014,10 @@ def preview_mod_images(source_dir: Path) -> None:
         overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；水平居中，顶部对齐。")
 
     def clamp_canvas_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-        """把裁剪框限制在当前预览图范围内。"""
-        preview_width, preview_height = state["replacement_preview_size"]
-        offset_x, offset_y = state["replacement_offset"]
-        if not preview_width or not preview_height:
-            return rect
-        min_x = int(offset_x)
-        min_y = int(offset_y)
-        max_x = min_x + int(preview_width)
-        max_y = min_y + int(preview_height)
+        """规范裁剪框尺寸，允许超出图片和画布范围。"""
         left, top, right, bottom = rect
         width = max(1, right - left)
         height = max(1, bottom - top)
-        if width > max_x - min_x:
-            width = max_x - min_x
-        if height > max_y - min_y:
-            height = max_y - min_y
-        left = min(max(left, min_x), max_x - width)
-        top = min(max(top, min_y), max_y - height)
         return left, top, left + width, top + height
 
     def aspect_canvas_rect(anchor: tuple[int, int], height: int, direction: tuple[int, int] = (1, 1)) -> tuple[int, int, int, int]:
@@ -1042,13 +1039,32 @@ def preview_mod_images(source_dir: Path) -> None:
         scale = float(state["replacement_scale"])
         offset_x, offset_y = state["replacement_offset"]
         left, top, right, bottom = clamp_canvas_rect(rect)
-        image_left = max(0, round((left - offset_x) / scale))
-        image_top = max(0, round((top - offset_y) / scale))
-        image_right = min(image.width, round((right - offset_x) / scale))
-        image_bottom = min(image.height, round((bottom - offset_y) / scale))
+        image_left = round((left - offset_x) / scale)
+        image_top = round((top - offset_y) / scale)
+        image_right = round((right - offset_x) / scale)
+        image_bottom = round((bottom - offset_y) / scale)
         if image_right - image_left < 2 or image_bottom - image_top < 2:
             raise ValueError("裁剪区域太小。")
         return image_left, image_top, image_right, image_bottom
+
+    def crop_with_padding(image, box: tuple[int, int, int, int]):
+        """裁剪图片，超出图片边界的部分用透明像素补齐。"""
+        Image = _load_pillow()
+        left, top, right, bottom = box
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        output = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        source_box = (
+            max(0, left),
+            max(0, top),
+            min(image.width, right),
+            min(image.height, bottom),
+        )
+        if source_box[2] > source_box[0] and source_box[3] > source_box[1]:
+            paste_x = max(0, -left)
+            paste_y = max(0, -top)
+            output.alpha_composite(image.crop(source_box), (paste_x, paste_y))
+        return output
 
     def current_cropped_final():
         """返回当前裁剪保存后在游戏内会显示的最终替换效果。"""
@@ -1058,7 +1074,7 @@ def preview_mod_images(source_dir: Path) -> None:
         if rect is None or image is None or original is None:
             return None
         crop_box = canvas_to_image_rect(rect)
-        cropped = image.crop(crop_box)
+        cropped = crop_with_padding(image, crop_box)
         return _resize_to_height(cropped, original.height)
 
     def show_overlay_image(image) -> None:
@@ -1097,7 +1113,7 @@ def preview_mod_images(source_dir: Path) -> None:
         try:
             crop_box = canvas_to_image_rect(rect)
             pair = pairs[int(state["index"])]
-            cropped = image.crop(crop_box)
+            cropped = crop_with_padding(image, crop_box)
             _backup_replacement_once(source_dir, pair.replacement)
             cropped.save(pair.replacement)
             show(int(state["index"]))
@@ -1107,6 +1123,33 @@ def preview_mod_images(source_dir: Path) -> None:
 
     save_button.configure(command=save_crop)
     clear_button.configure(command=clear_crop)
+
+    def apply_crop_height() -> None:
+        """按用户输入的图片像素高度调整裁剪框，宽度按原图比例同步变化。"""
+        rect = state["crop_rect"]
+        if rect is None:
+            return
+        try:
+            image_height = max(2, int(crop_height_var.get().strip()))
+        except ValueError:
+            overlay_var.set("高度必须是整数像素。")
+            return
+        scale = float(state["replacement_scale"])
+        canvas_height = max(2, round(image_height * scale))
+        left, top, right, bottom = rect
+        center = ((left + right) // 2, (top + bottom) // 2)
+        canvas_width = max(2, round(canvas_height * float(state["crop_aspect"])))
+        set_crop_rect(
+            (
+                center[0] - canvas_width // 2,
+                center[1] - canvas_height // 2,
+                center[0] - canvas_width // 2 + canvas_width,
+                center[1] - canvas_height // 2 + canvas_height,
+            )
+        )
+
+    height_button.configure(command=apply_crop_height)
+    height_entry.bind("<Return>", lambda _event: apply_crop_height())
 
     def show(index: int) -> None:
         pair = pairs[index]
@@ -1152,7 +1195,7 @@ def preview_mod_images(source_dir: Path) -> None:
             f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
             f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
-        overlay_var.set("可在中间图拖拽矩形裁剪；有裁剪框时方向键移动裁剪框，点击保存覆盖替换图。")
+        overlay_var.set("可在中间图拖拽裁剪框；允许超出图片，超出部分保存为透明。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)
