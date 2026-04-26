@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.23"
+TOOL_VERSION = "0.1.24"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -887,7 +887,7 @@ def _overlay_images(original, replacement):
     Image = _load_pillow()
     width = max(original.width, replacement.width)
     height = max(original.height, replacement.height)
-    canvas = Image.new("RGBA", (width, height), (92, 35, 65, 255))
+    canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
     original_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     replacement_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     original_x = (width - original.width) // 2
@@ -973,7 +973,7 @@ def preview_mod_images(source_dir: Path) -> None:
 
     original_image = tk.Label(root, bg="#222222", width=500, height=650)
     replacement_image = tk.Canvas(root, bg="#222222", width=500, height=650, highlightthickness=0)
-    overlay_image = tk.Label(root, bg="#222222", width=500, height=650)
+    overlay_image = tk.Label(root, bg="#ffffff", width=500, height=650)
     original_image.grid(row=2, column=0, padx=8, sticky="nsew")
     replacement_image.grid(row=2, column=1, padx=8, sticky="nsew")
     overlay_image.grid(row=2, column=2, padx=8, sticky="nsew")
@@ -1018,7 +1018,7 @@ def preview_mod_images(source_dir: Path) -> None:
     sliders.grid_columnconfigure(1, weight=1)
     help_text = (
         "按键：无裁剪框时方向键切换图片；有裁剪框时方向键按角色移动方向调整位置，"
-        "长按逐步加速；+/- 调整裁剪框大小；Esc 关闭。叠图紫红底色表示超出原始游戏画幅的区域。"
+        "长按逐步加速；+/- 调整裁剪框大小；Esc 关闭。叠图白底表示超出原始游戏画幅的区域。"
     )
     tk.Label(root, text=help_text, wraplength=1480, justify="left", fg="#555555").grid(
         row=6, column=0, columnspan=3, sticky="w", padx=24, pady=(0, 10)
@@ -1108,7 +1108,7 @@ def preview_mod_images(source_dir: Path) -> None:
         """清除当前裁剪框。"""
         set_crop_rect(None)
         show_overlay_image(state["base_overlay_image"])
-        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；紫红色表示超出原始画幅。")
+        overlay_var.set("替换图按游戏打包规则缩放后，与原图半透明叠加；白色表示超出原始画幅。")
 
     def clamp_canvas_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
         """规范裁剪框尺寸，允许超出图片和画布范围。"""
@@ -1334,7 +1334,7 @@ def preview_mod_images(source_dir: Path) -> None:
             f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
             f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
-        overlay_var.set("可在中间图拖拽裁剪框；紫红色叠图区域表示超出原始画幅。")
+        overlay_var.set("可在中间图拖拽裁剪框；白色叠图区域表示超出原始画幅。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)
