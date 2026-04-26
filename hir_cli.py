@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-TOOL_VERSION = "0.1.24"
+TOOL_VERSION = "0.1.25"
 if getattr(sys, "frozen", False):
     SCRIPT_DIR = Path(sys.executable).resolve().parent
     BUNDLE_DIR = Path(getattr(sys, "_MEIPASS")).resolve()
@@ -882,6 +882,23 @@ def _preview_transform(image, max_size: tuple[int, int]) -> tuple[object, float]
     return preview, scale
 
 
+def _preview_frame(original, image, frame_image=None):
+    """按游戏原始画幅生成统一预览图，画幅外区域用白色标识。"""
+    Image = _load_pillow()
+    reference = frame_image or image
+    width = max(original.width, image.width, reference.width)
+    height = max(original.height, image.height, reference.height)
+    canvas = Image.new("RGBA", (width, height), (255, 255, 255, 255))
+    original_x = (width - original.width) // 2
+    image_x = (width - image.width) // 2
+    canvas.alpha_composite(
+        Image.new("RGBA", (original.width, original.height), (32, 32, 32, 255)),
+        (original_x, 0),
+    )
+    canvas.alpha_composite(image, (image_x, 0))
+    return canvas, (image_x, 0)
+
+
 def _overlay_images(original, replacement):
     """把原图和按游戏规则缩放后的替换图居中叠加。"""
     Image = _load_pillow()
@@ -971,8 +988,8 @@ def preview_mod_images(source_dir: Path) -> None:
     replacement_label.grid(row=1, column=1)
     overlay_label.grid(row=1, column=2)
 
-    original_image = tk.Label(root, bg="#222222", width=500, height=650)
-    replacement_image = tk.Canvas(root, bg="#222222", width=500, height=650, highlightthickness=0)
+    original_image = tk.Label(root, bg="#ffffff", width=500, height=650)
+    replacement_image = tk.Canvas(root, bg="#ffffff", width=500, height=650, highlightthickness=0)
     overlay_image = tk.Label(root, bg="#ffffff", width=500, height=650)
     original_image.grid(row=2, column=0, padx=8, sticky="nsew")
     replacement_image.grid(row=2, column=1, padx=8, sticky="nsew")
@@ -1018,7 +1035,7 @@ def preview_mod_images(source_dir: Path) -> None:
     sliders.grid_columnconfigure(1, weight=1)
     help_text = (
         "按键：无裁剪框时方向键切换图片；有裁剪框时方向键按角色移动方向调整位置，"
-        "长按逐步加速；+/- 调整裁剪框大小；Esc 关闭。叠图白底表示超出原始游戏画幅的区域。"
+        "长按逐步加速；+/- 调整裁剪框大小；Esc 关闭。三列白底表示超出原始游戏画幅的区域。"
     )
     tk.Label(root, text=help_text, wraplength=1480, justify="left", fg="#555555").grid(
         row=6, column=0, columnspan=3, sticky="w", padx=24, pady=(0, 10)
@@ -1310,9 +1327,15 @@ def preview_mod_images(source_dir: Path) -> None:
             set_crop_rect(None)
             return
 
-        original_preview = _fit_preview(original, (490, 640))
-        replacement_preview, replacement_scale = _preview_transform(replacement, (490, 640))
-        replacement_offset = ((500 - replacement_preview.width) // 2, (650 - replacement_preview.height) // 2)
+        original_frame, _original_frame_offset = _preview_frame(original, original, replacement)
+        replacement_frame, replacement_frame_offset = _preview_frame(original, replacement)
+        original_preview = _fit_preview(original_frame, (490, 640))
+        replacement_preview, replacement_scale = _preview_transform(replacement_frame, (490, 640))
+        frame_offset = ((500 - replacement_preview.width) // 2, (650 - replacement_preview.height) // 2)
+        replacement_offset = (
+            frame_offset[0] + round(replacement_frame_offset[0] * replacement_scale),
+            frame_offset[1] + round(replacement_frame_offset[1] * replacement_scale),
+        )
         state["original"] = ImageTk.PhotoImage(original_preview)
         state["replacement"] = ImageTk.PhotoImage(replacement_preview)
         state["base_overlay_image"] = overlay
@@ -1325,7 +1348,7 @@ def preview_mod_images(source_dir: Path) -> None:
         configure_position_controls(replacement)
         original_image.configure(image=state["original"])
         replacement_image.delete("all")
-        replacement_image.create_image(*replacement_offset, anchor="nw", image=state["replacement"])
+        replacement_image.create_image(*frame_offset, anchor="nw", image=state["replacement"])
         show_overlay_image(overlay)
         set_crop_rect(None)
         title_var.set(f"{index + 1}/{len(pairs)}  {pair.filename}    方向键切换；裁剪后方向键移动角色；Esc 关闭")
@@ -1334,7 +1357,7 @@ def preview_mod_images(source_dir: Path) -> None:
             f"{pair.replacement.name}  {replacement_source.width}x{replacement_source.height}"
             f" -> {replacement.width}x{replacement.height}\n{pair.replacement}"
         )
-        overlay_var.set("可在中间图拖拽裁剪框；白色叠图区域表示超出原始画幅。")
+        overlay_var.set("可在中间图拖拽裁剪框；白色区域表示超出原始画幅。")
 
     def move(step: int) -> None:
         state["index"] = (int(state["index"]) + step) % len(pairs)
